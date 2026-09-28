@@ -5,7 +5,7 @@ import { nav } from '../lib/nav.js';
 import { TASK_TYPES } from '../lib/plan.js';
 import { rangeLabel, ayahLabel } from '../lib/quran.js';
 import {
-  ACCURACY, FLUENCY, MAX_TARGETED, addMistake, begin, continueAfterRepair, elapsedMs, finishPass, mistakeLabel,
+  ACCURACY, FLUENCY, MAX_TARGETED, addMistakes, begin, continueAfterRepair, elapsedMs, finishPass, mistakeLabel,
   pauseTimer, removeMistake, repairAttempt, resumeTimer, targetedAttempt, update, submit,
 } from '../lib/session.js';
 import { Button, CheckBurst, IconButton, OptionGrid, Pressable, Ring, Tag, TopBar, confirmSheet, softSpring, spring } from '../components/ui.jsx';
@@ -153,7 +153,7 @@ function Pass({ s }) {
   const last = s.pageIndex === total - 1;
   const logMistake = () => nav.push('logMistake', {
     pages: t.pages, current: page.n, marks: Object.entries(s.current).flatMap(([n, l]) => l.map(m => ({ ...m, page: +n }))),
-    onSave: m => { addMistake(getState().activeSession, m.page, m); nav.toast(m.ayahId ? `Mistake logged · ${m.ayahId}` : `Mistake logged · page ${m.page}`, 'flag'); },
+    onSave: mistakes => { addMistakes(getState().activeSession, mistakes); nav.toast(`${mistakes.length} mistake${mistakes.length === 1 ? '' : 's'} logged`, 'flag'); },
   }, 'modal');
   const random = page.startAyahId && settings.randomAccess && s.kind !== 'strengthen';
 
@@ -353,7 +353,7 @@ function Targeted({ s }) {
   const order = [...t.targets].sort((a, b) => Number(state(a.id).clean) - Number(state(b.id).clean));
   const mistake = target => nav.push('logMistake', {
     pages: [{ n: target.page, ayahIds: target.ayahIds ?? null }], current: target.page, highlight: target.ayahId, quickAyah: target.ayahId,
-    title: target.label, onSave: m => { targetedAttempt(getState().activeSession, target, false, m); nav.toast('Logged — try it again', 'flag'); },
+    title: target.label, onSave: mistakes => { targetedAttempt(getState().activeSession, target, false, mistakes); nav.toast('Logged — try it again', 'flag'); },
   }, 'modal');
   const finish = () => { try { submit(s); } catch (e) { nav.toast(e.message, 'alert'); } };
   return (
@@ -424,4 +424,3 @@ export default function Session({ draftId }) {
     </AnimatePresence>
   );
 }
-

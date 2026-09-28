@@ -1,6 +1,7 @@
 import { getState, mutate, nowIso, newId, saveActiveSession, clearActiveSession, logDayTask, addWordMarks, setSessionMeta, today } from './store.js';
 import { pageId, rangeLabel } from './quran.js';
 import { relativeDay } from './plan.js';
+import { appendMistakes, targetedObservation } from './session-mistakes.js';
 
 const good = a => a === 'good' || a === 'perfect';
 export const MAX_TARGETED = 3; // engine default strengthening.maxTargetedRepetitions
@@ -50,10 +51,8 @@ export function begin(session) {
   return update(session, s => resumeTimer({ ...s, phase: s.kind === 'targeted' ? 'targeted' : 'pass', pageIndex: 0 }));
 }
 
-export function addMistake(session, page, { ayahId, pos, type }) {
-  return update(session, s => ({
-    ...s, current: { ...s.current, [page]: [...(s.current[page] ?? []), { id: newId('m'), ayahId: ayahId ?? null, pos: pos ?? null, type: type ?? null }] },
-  }));
+export function addMistakes(session, mistakes) {
+  return update(session, s => appendMistakes(s, mistakes, () => newId('m')));
 }
 export function removeMistake(session, page, id) {
   return update(session, s => ({ ...s, current: { ...s.current, [page]: (s.current[page] ?? []).filter(m => m.id !== id) } }));
@@ -133,11 +132,8 @@ export function continueAfterRepair(session) {
 }
 
 /** Targeted-weakness practice: each attempt is a real observation in one session. */
-export function targetedAttempt(session, target, clean, mistake) {
-  const review = target.ayahId
-    ? { pageId: target.pageId, scope: 'ayah', ayahIds: target.ayahIds, accuracy: 'good', fluency: clean ? 'mostly_fluent' : 'hesitant', mistakes: clean ? [] : [{ ayahId: mistake?.ayahId ?? target.ayahId, ...(mistake?.type ? { type: mistake.type } : {}) }] }
-    : { pageId: target.pageId, accuracy: clean ? 'good' : 'difficult', fluency: clean ? 'mostly_fluent' : 'hesitant', mistakes: mistake?.ayahId ? [{ ayahId: mistake.ayahId, ...(mistake.type ? { type: mistake.type } : {}) }] : [] };
-  const marks = !clean && mistake?.ayahId ? [{ page: target.page, ayahId: mistake.ayahId, pos: mistake.pos ?? null, type: mistake.type ?? null }] : [];
+export function targetedAttempt(session, target, clean, mistakes = []) {
+  const { review, marks } = targetedObservation(target, clean, mistakes);
   return update(session, { ...session, attempts: [...session.attempts, { targetId: target.id, clean, review }], marks: [...session.marks, ...marks] });
 }
 
@@ -166,7 +162,7 @@ export function submit(session) {
     mutate(e => e.recordRevision({ sessionId: s.sessionId, occurredAt, activity: s.kind === 'retention' ? 'tested' : 'memory', purpose: task.purpose, actualDurationMinutes: minutes, pages }));
     result = {};
   }
-  const mistakes = s.kind === 'targeted' ? s.attempts.filter(a => !a.clean).length : s.steps.filter(st => st.kind === 'pass').reduce((n, st) => n + st.reviews.reduce((m, r) => m + r.mistakes.length, 0), 0);
+  const mistakes = s.kind === 'targeted' ? s.attempts.reduce((n, a) => n + a.review.mistakes.length, 0) : s.steps.filter(st => st.kind === 'pass').reduce((n, st) => n + st.reviews.reduce((m, r) => m + r.mistakes.length, 0), 0);
   result = { ...result, ...outcome(s, engine), minutes, mistakes, pages: task.pages.length };
   addWordMarks(s.marks.map(m => ({ ...m, sessionId: s.sessionId, date: today() })));
   setSessionMeta(s.sessionId, { title: task.title, kind: s.kind, subtitle: task.subtitle });

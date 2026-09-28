@@ -9,6 +9,18 @@ npm run dev        # http://localhost:5174 (or via .claude/launch.json → hifdh
 npm run build && npm run preview
 ```
 
+## Mistake logging and regression checks
+
+During a revision, tap **Log mistake**, choose a page, and tap each affected word or āyah.
+Each tap adds a marked location; select its mistake type if known. Marks stay selected when
+switching pages. Tap a selection to edit it, or use its remove button, then **Save N mistakes**
+to add the entire batch to the current recall. Targeted practice also records the batch as one attempt.
+
+Run `npm test` from the repository root for batch persistence and targeted-observation tests.
+With the dev server and Mushaf assets available, open `/test/mushaf.html` to run five real-browser
+rendering checks, including reopening a cached page, resizing and switching pages. These test
+fixtures are not included in the production build.
+
 ## Mushaf data
 
 `public/mushaf/` holds the Quran Foundation **QCF V2** (1441H Madinah, 15 lines, 604 pages) data:

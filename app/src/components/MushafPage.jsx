@@ -48,18 +48,22 @@ function Basmala() {
  *  highlight    Set of ayahIds to tint softly (e.g. a targeted weakness)
  *  onWord       ({ ayahId, pos, isEnd, glyph, text, page }) => void
  */
-export const MushafPage = memo(function MushafPage({ n, fit = 'contain', dimAyahs, selected, wordMarks, ayahMarks, highlight, onWord, onReady }) {
+export const MushafPage = memo(function MushafPage(props) {
+  // A new page needs its own loaded data and measured line layout.
+  return <PageContent key={props.n} {...props} />;
+});
+
+function PageContent({ n, fit = 'contain', dimAyahs, selected, wordMarks, ayahMarks, highlight, onWord, onReady }) {
   const hostRef = useRef(null), frameRef = useRef(null);
   const [data, setData] = useState(() => (isPageReady(n) ? cachedPages.get(n) : null));
   const [error, setError] = useState(null);
   const [box, setBox] = useState(null);
   const [layout, setLayout] = useState(null); // per-line 'justify' | 'center'
+  const hasBox = box !== null;
 
   useEffect(() => {
     let live = true;
     setError(null);
-    if (!(isPageReady(n) && cachedPages.get(n))) setData(null);
-    setLayout(null);
     loadAll(n).then(page => { cachedPages.set(n, page); if (live) setData(page); }).catch(e => live && setError(e));
     return () => { live = false; };
   }, [n]);
@@ -82,12 +86,13 @@ export const MushafPage = memo(function MushafPage({ n, fit = 'contain', dimAyah
     setLayout(lines.map(line => {
       if (special) return 'center';
       let sum = 0;
-      for (const w of line.children) sum += w.getBoundingClientRect().width;
-      const scale = frameRef.current.getBoundingClientRect().width / PAGE_W;
-      return sum / scale > (PAGE_W - PAD_X * 2) * 0.8 ? 'justify' : 'center';
+      // Unscaled widths stay valid while the host or its ancestors are animating.
+      for (const w of line.children) sum += w.offsetWidth;
+      return sum > (PAGE_W - PAD_X * 2) * 0.8 ? 'justify' : 'center';
     }));
     onReady?.();
-  }, [data, n]);
+    // Cached data can arrive before the first host measurement mounts the frame.
+  }, [data, n, hasBox]);
 
   const scale = box ? (fit === 'width' ? box.w / PAGE_W : Math.min(box.w / PAGE_W, box.h / PAGE_H)) : 0;
   const top = box && fit !== 'width' ? Math.max(0, (box.h - PAGE_H * scale) / 2) : 0;
@@ -134,7 +139,7 @@ export const MushafPage = memo(function MushafPage({ n, fit = 'contain', dimAyah
       )}
     </div>
   );
-});
+}
 
 /** A short preview of an ayah using its real Mushaf glyphs (same page font). */
 export function AyahGlyphs({ page, ayahId, size = 22, maxWords = 8 }) {

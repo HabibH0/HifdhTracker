@@ -2,9 +2,9 @@ import { useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { nav } from '../lib/nav.js';
 import { pageMeta, ayahLabel, rangeLabel } from '../lib/quran.js';
-import { MISTAKE_TYPES } from '../lib/session.js';
+import { MISTAKE_TYPES, mistakeLabel } from '../lib/session.js';
 import { MushafPage, WordGlyph } from '../components/MushafPage.jsx';
-import { Button, IconButton, Pressable, spring } from '../components/ui.jsx';
+import { Button, IconButton, Pressable } from '../components/ui.jsx';
 import { Icon } from '../components/Icons.jsx';
 import { preload } from '../lib/mushaf.js';
 
@@ -14,14 +14,18 @@ import { preload } from '../lib/mushaf.js';
  * marks     [{ page, ayahId, pos }] already logged this session
  * highlight ayahId to tint (targeted practice)
  * quickAyah offers a one-tap "log at this āyah" shortcut
- * onSave    ({ page, ayahId, pos, type }) => void
+ * onSave    ([{ page, ayahId, pos, type }]) => void — one batch for this recall
  */
 export default function MistakeLogger({ pages, current, marks = [], highlight, quickAyah, onSave, title }) {
   const single = pages.length === 1;
   const [step, setStep] = useState(single ? 'page' : 'grid');
   const [page, setPage] = useState(current);
   const [sel, setSel] = useState(null);
-  const [type, setType] = useState(null);
+  const [pending, setPending] = useState([]);
+  const locationKey = m => `${m.page}:${m.ayahId ?? 'page'}:${m.pos ?? 'ayah'}`;
+  const selected = pending.find(m => sel && locationKey(m) === locationKey(sel));
+  const type = selected?.type ?? null;
+  const allMarks = useMemo(() => [...marks, ...pending], [marks, pending]);
   const info = pages.find(p => p.n === page);
 
   const dim = useMemo(() => {
@@ -29,11 +33,25 @@ export default function MistakeLogger({ pages, current, marks = [], highlight, q
     const allowed = new Set(info.ayahIds);
     return new Set(pageMeta(page).ayahs.filter(a => !allowed.has(a)));
   }, [page, info]);
-  const wordMarks = useMemo(() => new Map(marks.filter(m => m.page === page && m.pos).map(m => [`${m.ayahId}:${m.pos}`, 1])), [marks, page]);
-  const ayahMarks = useMemo(() => new Map(marks.filter(m => m.page === page && m.ayahId && !m.pos).map(m => [m.ayahId, 1])), [marks, page]);
-  const counts = useMemo(() => marks.reduce((acc, m) => ({ ...acc, [m.page]: (acc[m.page] ?? 0) + 1 }), {}), [marks]);
+  const wordMarks = useMemo(() => new Map(allMarks.filter(m => m.page === page && m.pos).map(m => [`${m.ayahId}:${m.pos}`, 1])), [allMarks, page]);
+  const ayahMarks = useMemo(() => new Map(allMarks.filter(m => m.page === page && m.ayahId && !m.pos).map(m => [m.ayahId, 1])), [allMarks, page]);
+  const counts = useMemo(() => allMarks.reduce((acc, m) => ({ ...acc, [m.page]: (acc[m.page] ?? 0) + 1 }), {}), [allMarks]);
 
-  const save = (m = sel) => { onSave({ page, ayahId: m?.ayahId ?? null, pos: m?.pos ?? null, type }); nav.pop(); };
+  const mark = m => {
+    const item = { ...m, page, ayahId: m?.ayahId ?? null, pos: m?.pos ?? null, type: null };
+    setPending(items => items.some(p => locationKey(p) === locationKey(item)) ? items : [...items, item]);
+    setSel(item);
+  };
+  const setType = value => setPending(items => items.map(m => locationKey(m) === locationKey(sel) ? { ...m, type: value } : m));
+  const removeSelected = () => {
+    setPending(items => items.filter(m => locationKey(m) !== locationKey(sel)));
+    setSel(null);
+  };
+  const save = () => {
+    if (!pending.length) return;
+    onSave(pending.map(({ page, ayahId, pos, type }) => ({ page, ayahId, pos, type })));
+    nav.pop();
+  };
   const choose = n => { setPage(n); setSel(null); setStep('page'); };
 
   return (
@@ -41,10 +59,10 @@ export default function MistakeLogger({ pages, current, marks = [], highlight, q
       <div className="topbar">
         <IconButton icon={step === 'page' && !single ? 'chevronLeft' : 'close'} label="Back" onClick={() => (step === 'page' && !single ? (setStep('grid'), setSel(null)) : nav.pop())} />
         <div className="title stack" style={{ gap: 0 }}>
-          <span>{step === 'grid' ? 'Where was the mistake?' : title ?? `Page ${page}`}</span>
-          <span className="tiny" style={{ fontWeight: 400 }}>{step === 'grid' ? 'Choose the page' : 'Tap the word, or the āyah number'}</span>
+          <span>{step === 'grid' ? 'Mark mistakes' : title ?? `Page ${page}`}</span>
+          <span className="tiny" style={{ fontWeight: 400 }}>{step === 'grid' ? 'Choose a page · marks stay selected' : 'Tap each word or āyah with a mistake'}</span>
         </div>
-        {step === 'page' ? <Pressable className="link" style={{ width: 64, justifyContent: 'flex-end', paddingRight: 6, fontSize: 13 }} onClick={() => save(null)}>Whole page</Pressable> : <span className="spacer" />}
+        {step === 'page' ? <Pressable className="link" style={{ width: 64, justifyContent: 'flex-end', paddingRight: 6, fontSize: 13 }} onClick={() => mark(null)}>Whole page</Pressable> : <span className="spacer" />}
       </div>
 
       <AnimatePresence mode="wait" initial={false}>
@@ -71,40 +89,36 @@ export default function MistakeLogger({ pages, current, marks = [], highlight, q
             <div className="grow" style={{ minHeight: 0, padding: '0 8px 8px', position: 'relative' }} onClick={() => setSel(null)}>
               <div style={{ position: 'absolute', inset: '0 8px 8px', background: 'var(--paper)', borderRadius: 18, border: '1px solid var(--line)' }} />
               <div style={{ position: 'absolute', inset: '8px 12px 16px' }}>
-                <MushafPage n={page} dimAyahs={dim} selected={sel} wordMarks={wordMarks} ayahMarks={ayahMarks} highlight={highlight ? new Set([highlight]) : null} onWord={w => { setSel(w); }} />
+                <MushafPage n={page} dimAyahs={dim} selected={sel} wordMarks={wordMarks} ayahMarks={ayahMarks} highlight={highlight ? new Set([highlight]) : null} onWord={mark} />
               </div>
             </div>
-            <AnimatePresence>
-              {(sel || quickAyah) && (
-                <motion.div key="panel" initial={{ y: 60, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 60, opacity: 0 }} transition={spring}
-                  style={{ background: 'var(--card)', borderTop: '1px solid var(--line)', borderRadius: '22px 22px 0 0', boxShadow: 'var(--shadow-lg)', padding: '14px 0 calc(var(--safe-b) + 14px)' }}>
-                  {sel ? (
-                    <>
-                      <div className="row-flex pad" style={{ gap: 12 }}>
-                        <div style={{ minWidth: 56, height: 56, borderRadius: 14, background: 'var(--paper)', border: '1px solid var(--line)', display: 'grid', placeItems: 'center', padding: '0 8px' }}>
-                          <WordGlyph page={page} glyph={sel.glyph} size={sel.isEnd ? 30 : 34} />
-                        </div>
-                        <div className="grow">
-                          <div className="h3">{sel.isEnd ? `Āyah ${sel.ayahId}` : `Word ${sel.pos}`}</div>
-                          <div className="tiny">{ayahLabel(sel.ayahId)} · page {page}</div>
-                        </div>
-                      </div>
-                      <div style={{ display: 'flex', gap: 8, overflowX: 'auto', padding: '14px 20px 2px' }}>
-                        {MISTAKE_TYPES.map(t => (
-                          <button key={t.value} className={`chip ${type === t.value ? 'on' : ''}`} style={{ flexShrink: 0 }} onClick={() => setType(type === t.value ? null : t.value)}>{t.label}</button>
-                        ))}
-                      </div>
-                      <div className="pad" style={{ marginTop: 12 }}><Button size="lg" block onClick={() => save()}><Icon name="flag" size={18} />Save mistake</Button></div>
-                    </>
-                  ) : (
-                    <div className="pad"><Button variant="secondary" size="lg" block onClick={() => save({ ayahId: quickAyah, pos: null })}>Log at āyah {quickAyah}</Button></div>
-                  )}
-                </motion.div>
-              )}
-            </AnimatePresence>
           </motion.div>
         )}
       </AnimatePresence>
+      <div className="footer border" style={{ flexShrink: 0, background: 'var(--card)' }}>
+        {step === 'page' && selected && <>
+          <div className="row-flex" style={{ gap: 12 }}>
+            {sel.glyph && <WordGlyph page={page} glyph={sel.glyph} size={30} />}
+            <div className="grow">
+              <div className="h3">{sel.ayahId ? sel.pos ? `Word ${sel.pos}` : `Āyah ${sel.ayahId}` : 'Whole page'}</div>
+              <div className="tiny">{sel.ayahId ? `${ayahLabel(sel.ayahId)} · ` : ''}page {page}</div>
+            </div>
+            <IconButton icon="close" label="Remove selected mistake" onClick={removeSelected} />
+          </div>
+          <div style={{ display: 'flex', gap: 8, overflowX: 'auto', padding: '2px 0' }}>
+            {MISTAKE_TYPES.map(t => <button key={t.value} className={`chip ${type === t.value ? 'on' : ''}`} aria-pressed={type === t.value} style={{ flexShrink: 0 }} onClick={() => setType(type === t.value ? null : t.value)}>{t.label}</button>)}
+          </div>
+        </>}
+        {step === 'page' && !selected && quickAyah && <Button variant="secondary" block onClick={() => mark({ ayahId: quickAyah })}>Mark āyah {quickAyah}</Button>}
+        {pending.length > 0 && <div aria-label="Selected mistakes" style={{ display: 'flex', gap: 8, overflowX: 'auto', padding: '2px 0' }}>
+          {pending.map(m => <button key={locationKey(m)} className={`chip ${selected && locationKey(selected) === locationKey(m) ? 'on' : ''}`} style={{ flexShrink: 0, fontSize: 12 }}
+            aria-label={`Page ${m.page}, ${m.ayahId ? `āyah ${m.ayahId}${m.pos ? ` word ${m.pos}` : ''}` : 'whole page'}, ${mistakeLabel(m.type)}`}
+            onClick={() => { setPage(m.page); setStep('page'); setSel(m); }}>
+            {m.page} · {m.ayahId ? `${m.ayahId}${m.pos ? ` · word ${m.pos}` : ''}` : 'Whole page'}
+          </button>)}
+        </div>}
+        <Button size="lg" block disabled={!pending.length} onClick={save}><Icon name="flag" size={18} />{pending.length ? `Save ${pending.length} mistake${pending.length === 1 ? '' : 's'}` : 'Tap to mark mistakes'}</Button>
+      </div>
     </div>
   );
 }
