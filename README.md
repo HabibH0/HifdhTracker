@@ -23,7 +23,7 @@ const engine = new RevisionEngine({
 });
 
 const plan = engine.generateDailyPlan('2026-09-27', 'normal');
-// { strengthen, dueReviews, targetedWeaknesses, maintenance,
+// { strengthen, dueReviews, targetedWeaknesses, maintenance, dailyReviews,
 //   totalEstimatedDurationMinutes, deferredItems, ... }
 
 engine.recordRevision({
@@ -172,6 +172,10 @@ All scheduling constants are in [`src/config.js`](src/config.js). Defaults imple
 Daily capacities are 30/60/90/120 minutes for `light`/`normal`/`full`/`intensive`, or pass a numeric number of minutes. Time estimates default to 1.5 minutes per active page, 0.75 per targeted page, 0.5 per targeted ayah, plus 0.25 for a random-start test. Partial-page duration estimates scale by the proportion of contained ayat enrolled, with a configurable 0.25-minute minimum capped at the full-page estimate. Ayah counts are an estimate of workload, not a claim that all ayat have equal length. Actual session durations are saved; no automatic personalization is assumed yet.
 
 The planner reserves active-cycle work, mandatory early checks, overdue/high-risk pages, ordinary due pages, targeted weaknesses, and maintenance in that order. When starting an optional new cycle, mandatory early checks are reserved first. Within due groups it sorts by the requested risk/weakness/failure/recent-strengthening priority. Planning is pure and repeatable; completion, not viewing a plan, advances rotation.
+
+The remaining capacity also supports a **daily review alongside relearning**, including developing material whose spaced review is not yet due. `dailyReview.targetMinutes` defaults to 30 minutes of review workload per day (set to 0 to disable this additional rotation). Due reviews, early checks, maintenance, and already completed ordinary review count toward this target; strengthening and targeted practice do not. Completed review counts by estimated coverage so a faster recitation does not continually create extra tasks. Actual durations still determine remaining daily capacity.
+
+The `dailyReviews` array selects never-reviewed material first, then material with the oldest active recall, using enrollment date, risk, due date and metadata order to break ties. It excludes current strengthening work, pending retention groups, already selected work, unmemorized material, and pages recalled that day. Mandatory retention gaps remain unchanged. This is preventive rotation, so these items are not reported as overdue and do not alter due dates until actually reviewed. The app displays them as **Daily review** and records them as ordinary active recall. If every known page belongs to the current cycle, or protected work consumes the available time, no additional review is invented.
 
 Completed work on the requested day subtracts its actual duration, or its estimate if actual duration was omitted, from the available capacity. A normal day targets approximately one juz of maintenance, with fair rotation, recency and risk tie-breakers; due/selected pages are excluded. Only known material participates, so someone who knows less than a juz receives a smaller maintenance selection. Partial strong sections contribute toward the target by their estimated memorized page fraction.
 

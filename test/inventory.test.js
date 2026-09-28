@@ -15,7 +15,7 @@ test('new users start empty; unknown material is never treated as weak or overdu
   assert.deepEqual(engine.getUpcomingReviews('2027-01-01'), []);
   const plan = engine.generateDailyPlan('2027-01-01', 'light');
   assert.equal(plan.totalEstimatedDurationMinutes, 0);
-  for (const key of ['strengthen', 'dueReviews', 'targetedWeaknesses', 'maintenance', 'deferredItems']) assert.deepEqual(plan[key], []);
+  for (const key of ['strengthen', 'dueReviews', 'targetedWeaknesses', 'maintenance', 'dailyReviews', 'deferredItems']) assert.deepEqual(plan[key], []);
   assert.throws(() => review(engine), /no memorized material/);
   assert.throws(() => strengthen(engine, 2), /no memorized material/);
 });

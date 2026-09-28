@@ -30,12 +30,21 @@ export function buildDailyPlan(engine, at, capacity) {
   const config = engine.config, day = calendarDay(at, config.timeZone);
   const capacityMinutes = typeof capacity === 'string' ? config.capacityMinutes[capacity] : capacity;
   if (!Number.isFinite(capacityMinutes) || capacityMinutes < 0) throw new Error('Capacity must be a known preset or a nonnegative number of minutes');
-  const plan = { date: day, capacityMinutes, completedDurationMinutes: 0, remainingCapacityMinutes: 0, strengthen: [], dueReviews: [], targetedWeaknesses: [], maintenance: [], totalEstimatedDurationMinutes: 0, deferredItems: [] };
+  const plan = { date: day, capacityMinutes, completedDurationMinutes: 0, remainingCapacityMinutes: 0, strengthen: [], dueReviews: [], targetedWeaknesses: [], maintenance: [], dailyReviews: [], totalEstimatedDurationMinutes: 0, deferredItems: [] };
   const known = new Set(engine.getMemorizedMaterial().ayahIds);
   const completed = new Set();
+  const reviewedOutsideStrengthening = new Set();
+  let completedReviewMinutes = 0;
   for (const session of Object.values(engine.state.sessions)) if (calendarDay(session.occurredAt, config.timeZone) === day) {
     plan.completedDurationMinutes += session.actualDurationMinutes ?? session.reviews.reduce((sum, r) => sum + (engine._isCompleteReview(r) ? Math.min(config.durations.activePageMinutes, Math.max(config.durations.minimumPartialPageMinutes, config.durations.activePageMinutes * r.ayahIds.length / engine.pageMetadata.get(r.pageId).ayahIds.length)) : config.durations.targetedAyahMinutes), 0);
-    for (const r of session.reviews) if (config.activities[r.activity].active && engine._isCompleteReview(r) && r.coverageVersion === engine._page(r.pageId).coverageVersion) completed.add(r.pageId);
+    for (const r of session.reviews) if (config.activities[r.activity].active && engine._isCompleteReview(r) && r.coverageVersion === engine._page(r.pageId).coverageVersion) {
+      completed.add(r.pageId);
+      if (!['strengthening', 'targeted'].includes(session.purpose) && !reviewedOutsideStrengthening.has(r.pageId)) {
+        reviewedOutsideStrengthening.add(r.pageId);
+        // Count completed coverage, rather than speed, so finishing quickly doesn't create extra tasks.
+        completedReviewMinutes += engine._pageMinutes(r.pageId);
+      }
+    }
   }
   plan.completedDurationMinutes = rounded(plan.completedDurationMinutes);
   plan.remainingCapacityMinutes = Math.max(0, rounded(capacityMinutes - plan.completedDurationMinutes));
@@ -123,6 +132,20 @@ export function buildDailyPlan(engine, at, capacity) {
     if (!pageIds.length) continue;
     const prescription = activityFor(engine, pageIds, day, at);
     if (add('maintenance', { ...item, pageIds, passage: engine._passage(pageIds), fractionOfJuz: rounded(selectedFraction), kind: 'maintenance', reason: 'fair_rotation_of_strong_material', ...prescription, estimatedMinutes: pageIds.reduce((sum, id) => sum + engine._pageMinutes(id), 0) + prescription.randomAccessTests.length * config.durations.randomStartExtraMinutes })) maintained += selectedFraction;
+  }
+
+  // Keep a regular review alongside strengthening, even before developing material becomes due.
+  // Mandatory checks keep their gaps; already selected/completed pages cannot be assigned twice.
+  const plannedReviewMinutes = [...plan.dueReviews, ...plan.maintenance].reduce((sum, item) => sum + item.estimatedMinutes, 0);
+  let dailyBudget = Math.max(0, Math.min(config.dailyReview.targetMinutes - completedReviewMinutes - plannedReviewMinutes, plan.remainingCapacityMinutes - plan.totalEstimatedDurationMinutes));
+  const candidates = engine._knownPages().filter(meta => !selected.has(meta.id) && !completed.has(meta.id) && !allDue.has(meta.id) && !candidate?.pageIds.includes(meta.id) && !engine._cycleForPage(meta.id) && !engine._retentionForPage(meta.id)).map((meta, order) => ({ meta, order, page: engine._page(meta.id), risk: engine.getForgettingRisk(meta.id, at) }));
+  candidates.sort((a, b) => (a.page.lastActiveRecallAt ?? '').localeCompare(b.page.lastActiveRecallAt ?? '') || a.page.enrolledAt.localeCompare(b.page.enrolledAt) || b.risk.priority - a.risk.priority || a.page.nextReviewAt.localeCompare(b.page.nextReviewAt) || a.order - b.order);
+  for (const { meta, page, risk } of candidates) {
+    if (dailyBudget <= 0) break;
+    const prescription = activityFor(engine, [meta.id], day, at);
+    const estimatedMinutes = rounded(engine._pageMinutes(meta.id) + prescription.randomAccessTests.length * config.durations.randomStartExtraMinutes);
+    if (estimatedMinutes > dailyBudget + 1e-9) continue;
+    if (add('dailyReviews', { kind: 'daily_review', pageId: meta.id, pageIds: [meta.id], halfJuzId: meta.halfJuzId, juzId: meta.juzId, passage: engine._passage([meta.id]), ayahIds: [...page.memorizedAyahIds], risk, nextReviewAt: page.nextReviewAt, reason: page.lastActiveRecallAt ? 'daily_rotation' : 'initial_verification', ...prescription, estimatedMinutes })) dailyBudget = rounded(dailyBudget - estimatedMinutes);
   }
   return plan;
 }

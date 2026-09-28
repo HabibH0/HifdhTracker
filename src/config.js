@@ -42,6 +42,7 @@ export const DEFAULT_CONFIG = {
   capacityMinutes: { light: 30, normal: 60, full: 90, intensive: 120 },
   durations: { activePageMinutes: 1.5, targetedPageMinutes: 0.75, targetedAyahMinutes: 0.5, randomStartExtraMinutes: 0.25, minimumPartialPageMinutes: 0.25 },
   maintenance: { targetJuzPerDay: 1, randomAccessFraction: 0.10 },
+  dailyReview: { targetMinutes: 30 },
   targeting: { contextAyahsBefore: 1, contextAyahsAfter: 1, cleanRecallsRequired: 1 },
 };
 

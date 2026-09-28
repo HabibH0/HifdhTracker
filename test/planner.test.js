@@ -35,7 +35,7 @@ test('daily capacity is respected across all sections and urgent deferrals are h
   for (const capacity of [0, 1, 5, 15, 30, 60, 90, 120]) {
     const plan = engine.generateDailyPlan(timestamp(20), capacity);
     assert.ok(plan.totalEstimatedDurationMinutes <= capacity);
-    assert.equal(plan.totalEstimatedDurationMinutes, [...plan.strengthen, ...plan.dueReviews, ...plan.targetedWeaknesses, ...plan.maintenance].reduce((sum, p) => sum + p.estimatedMinutes, 0));
+    assert.equal(plan.totalEstimatedDurationMinutes, [...plan.strengthen, ...plan.dueReviews, ...plan.targetedWeaknesses, ...plan.maintenance, ...plan.dailyReviews].reduce((sum, p) => sum + p.estimatedMinutes, 0));
     assert.ok(plan.deferredItems.every(p => typeof p.postponementReason === 'string'));
   }
   const deferred = engine.generateDailyPlan(timestamp(20), 1).deferredItems;
