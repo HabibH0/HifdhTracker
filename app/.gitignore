@@ -1,0 +1,6 @@
+node_modules/
+dist/
+scripts/.cache/
+.env.local
+.env.*.local
+public/mushaf/

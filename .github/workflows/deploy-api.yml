@@ -1,0 +1,44 @@
+name: Deploy API to Neon
+
+on:
+  push:
+    branches: [main]
+    paths: ['backend/**', 'shared/**', 'src/**', '.github/workflows/deploy-api.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: neon-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Only runs once the Neon secrets/variables are configured (see backend/README.md).
+    if: ${{ vars.NEON_PROJECT_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install and test
+        run: |
+          npm test
+          npm ci --prefix backend
+          npm test --prefix backend
+
+      - name: Apply database migrations
+        run: npm run migrate --prefix backend
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+
+      - name: Deploy function
+        working-directory: backend
+        run: npx neonctl deploy --project-id "$NEON_PROJECT_ID" --branch "${NEON_BRANCH:-main}" --update-existing --no-env-pull
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+          NEON_BRANCH: ${{ vars.NEON_BRANCH }}
+          ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}

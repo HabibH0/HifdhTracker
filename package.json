@@ -1,0 +1,10 @@
+{
+  "name": "hifdh-revision-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic, event-backed Qur'an revision scheduling domain engine",
+  "exports": { ".": "./src/index.js", "./node-store": "./src/node-store.js" },
+  "scripts": { "test": "node --test test/*.test.js", "check": "node --check src/engine.js && node --check src/planner.js && node --test test/*.test.js" },
+  "engines": { "node": ">=22" }
+}
