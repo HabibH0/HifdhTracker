@@ -275,7 +275,12 @@ const media = typeof matchMedia === 'function' ? matchMedia('(prefers-color-sche
 function applyTheme(theme) {
   const dark = theme === 'dark' || (theme === 'system' && media?.matches);
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-  document.querySelector('meta[name=theme-color]')?.setAttribute('content', dark ? '#111613' : '#F6F2E8');
+  // "System" keeps each meta's own colour (matched to its media query); an explicit Light/Dark
+  // choice paints the bar the same way whatever the phone's appearance is.
+  for (const meta of document.querySelectorAll('meta[name=theme-color]')) {
+    const own = meta.media.includes('dark') ? '#111613' : '#F6F2E8';
+    meta.setAttribute('content', theme === 'system' ? own : dark ? '#111613' : '#F6F2E8');
+  }
 }
 media?.addEventListener?.('change', () => applyTheme(state.settings.theme));
 
