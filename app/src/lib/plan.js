@@ -8,6 +8,7 @@ export const TASK_TYPES = {
   strengthen: { label: 'Strengthen', tone: 'green', icon: 'layers' },
   retention: { label: 'Due review', tone: 'blue', icon: 'refresh' },
   review: { label: 'Due review', tone: 'blue', icon: 'refresh' },
+  ahead: { label: 'Review ahead', tone: 'blue', icon: 'refresh' },
   targeted: { label: 'Targeted weaknesses', tone: 'amber', icon: 'target' },
   maintenance: { label: 'Maintenance', tone: 'gold', icon: 'leaf' },
 };
@@ -118,6 +119,37 @@ function maintenanceTask(engine, items) {
   };
 }
 
+/**
+ * Nothing is due, but material is enrolled (typically just after adding it: self-rated
+ * material isn't due for days, then all of it falls due at once). Offer the pages scheduled
+ * soonest, in Mushaf order, within today's time. Recording them replaces the self-rating with
+ * real evidence and spreads the first round of reviews over several days.
+ */
+function aheadTask(engine, capacity) {
+  const upcoming = engine.getUpcomingReviews(nowIso(), { days: 120 })
+    .filter(u => !u.mandatory)
+    .sort((a, b) => a.nextReviewAt.localeCompare(b.nextReviewAt) || pageNum(a.pageId) - pageNum(b.pageId));
+  const picked = [];
+  let minutes = 0;
+  for (const u of upcoming) {
+    const m = engine._pageMinutes(u.pageId);
+    if (minutes + m > capacity + 1e-9) break;
+    picked.push(u); minutes += m;
+  }
+  if (!picked.length) return null;
+  picked.sort((a, b) => pageNum(a.pageId) - pageNum(b.pageId));
+  const nums = picked.map(u => pageNum(u.pageId));
+  const juz = [...new Set(picked.map(u => juzNum(engine.pageMetadata.get(u.pageId).juzId)))];
+  return {
+    key: 'ahead', kind: 'ahead',
+    title: `Juz ${compressPages(juz)}`, subtitle: nums.length > 1 ? countPages(nums) : pagesLabel(nums),
+    status: 'Nothing due yet · getting ahead',
+    minutes: mins(minutes), passes: 1, purpose: 'ordinary', activity: 'memory',
+    pages: pageInfo(engine, { pages: picked.flatMap(u => u.passage.pages) }),
+    range: rangeLabel(picked.flatMap(u => u.passage.ayahIds)),
+  };
+}
+
 /** Today = completed tasks (logged) + the engine's current view of what remains. */
 export function todayPlan() {
   const capacity = capacityToday();
@@ -133,6 +165,11 @@ export function todayPlan() {
     // The planner rotates to the next juz once one is maintained; one juz a day is the target.
     const maintained = done.filter(t => t.kind === 'maintenance').reduce((s, t) => s + (t.fraction ?? 1), 0);
     if (maintained < 0.95 && plan.maintenance.length) pending.push(maintenanceTask(engine, plan.maintenance));
+    const blocked = plan.deferredItems.some(d => d.reason !== 'later_calendar_day_required');
+    if (!pending.length && !done.length && !blocked) {
+      const ahead = aheadTask(engine, capacity);
+      if (ahead) pending.push(ahead);
+    }
     const doneKeys = new Set(done.map(t => t.key));
     for (const task of pending) if (doneKeys.has(task.key)) task.key += ':again';
     const deferred = plan.deferredItems.filter(d => d.reason !== 'later_calendar_day_required').map(d => ({
