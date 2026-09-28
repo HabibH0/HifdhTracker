@@ -16,17 +16,20 @@ export function toEngineSelection(sel) {
   };
 }
 
-/** Ayat and pages that the selection would newly add, given what is already known. */
-export function selectionSummary(sel, known = new Set()) {
+/** Ayat the selection would newly add, given what is already known. */
+export function freshAyat(sel, known = new Set()) {
   const ayat = new Set();
   for (const j of sel.juz) for (const p of JUZ_PAGES[j - 1]) PAGES[p - 1].ayahs.forEach(a => ayat.add(a));
   for (const p of sel.pages) PAGES[p - 1].ayahs.forEach(a => ayat.add(a));
   for (const s of sel.surahs) for (let a = 1; a <= SURAHS[s - 1].verses; a++) ayat.add(`${s}:${a}`);
   for (const r of sel.ranges) for (let a = r.from; a <= r.to; a++) ayat.add(`${r.s}:${a}`);
-  const fresh = [...ayat].filter(a => !known.has(a));
-  const freshSet = new Set(fresh);
-  const pages = PAGES.filter(p => p.ayahs.some(a => freshSet.has(a))).length;
-  return { ayat: fresh.length, pages };
+  return new Set([...ayat].filter(a => !known.has(a)));
+}
+
+export function selectionSummary(sel, known = new Set()) {
+  const fresh = freshAyat(sel, known);
+  const pages = PAGES.filter(p => p.ayahs.some(a => fresh.has(a))).length;
+  return { ayat: fresh.size, pages };
 }
 
 export function summaryLabel({ ayat, pages }) {

@@ -7,12 +7,8 @@ import { seedDemo } from '../lib/demo.js';
 import MaterialPicker, { emptySelection, selectionSummary, summaryLabel, toEngineSelection } from '../components/MaterialPicker.jsx';
 import { Button, IconButton, OptionGrid, spring } from '../components/ui.jsx';
 import { Star, StarPattern } from '../components/Icons.jsx';
+import SectionRater, { selectionSections, strengthMap } from '../components/SectionRater.jsx';
 
-export const STRENGTHS = [
-  { value: 'weak', label: 'Needs work', sub: 'Frequent slips; I need prompting' },
-  { value: 'medium', label: 'Fairly solid', sub: 'Some mistakes, mostly recalled' },
-  { value: 'strong', label: 'Strong', sub: 'I recite it confidently' },
-];
 export const CAPACITIES = [
   { value: 30, label: '30 min', sub: 'Light' },
   { value: 60, label: '60 min', sub: 'Standard' },
@@ -26,16 +22,18 @@ const slide = { enter: d => ({ x: d > 0 ? 60 : -60, opacity: 0 }), center: { x: 
 export default function Onboarding() {
   const [[step, dir], setStep] = useState([0, 1]);
   const [sel, setSel] = useState(emptySelection);
-  const [strength, setStrength] = useState(null);
+  const [ratings, setRatings] = useState({});
   const [capacity, setCapacity] = useState(60);
   const [busy, setBusy] = useState(false);
   const summary = useMemo(() => selectionSummary(sel), [sel]);
   const pages = summary.ayat;
+  const sections = useMemo(() => selectionSections(sel), [sel]);
+  const rated = sections.length > 0 && sections.every(s => ratings[s.hizb]);
   const go = to => setStep([to, to > step ? 1 : -1]);
 
   const finish = () => {
     setBusy(true);
-    setTimeout(() => createEngine({ memorized: toEngineSelection(sel), initialStrength: strength, capacity }), 30);
+    setTimeout(() => createEngine({ memorized: toEngineSelection(sel), initialStrength: strengthMap(sections, ratings), capacity }), 30);
   };
   const demo = () => { setBusy(true); setTimeout(() => seedDemo(), 60); };
 
@@ -91,18 +89,14 @@ export default function Onboarding() {
           {step === 2 && (
             <>
               <div className="topbar"><IconButton icon="chevronLeft" onClick={() => go(1)} label="Back" /><div className="title" /><span className="spacer" /></div>
-              <div className="pad stack gap-12 grow">
-                <h1 className="h2">How well do you know it right now?</h1>
-                <p className="sub" style={{ margin: '0 0 8px' }}>A starting point only — your actual revisions quickly take over.</p>
-                <div className="stack gap-8">
-                  {STRENGTHS.map(s => (
-                    <motion.button key={s.value} whileTap={{ scale: 0.98 }} onClick={() => setStrength(s.value)} className={`opt ${strength === s.value ? 'on' : ''}`} style={{ alignItems: 'flex-start', padding: '14px 18px', minHeight: 70 }}>
-                      <span style={{ fontSize: 16 }}>{s.label}</span><span className="opt-sub" style={{ fontSize: 13.5 }}>{s.sub}</span>
-                    </motion.button>
-                  ))}
-                </div>
+              <div className="pad stack gap-8" style={{ paddingBottom: 12 }}>
+                <h1 className="h2">How well do you know each part?</h1>
+                <p className="sub" style={{ margin: 0 }}>Relearning sections go through the 3-day strengthening cycle first. Your revisions quickly take over from these ratings.</p>
               </div>
-              <div className="footer"><Button size="lg" block disabled={!strength} onClick={() => go(3)}>Continue</Button></div>
+              <div className="scroll pad" style={{ paddingBottom: 16 }}>
+                <SectionRater sections={sections} ratings={ratings} onChange={setRatings} />
+              </div>
+              <div className="footer border"><Button size="lg" block disabled={!rated} onClick={() => go(3)}>{rated ? 'Continue' : `Rate ${sections.filter(s => !ratings[s.hizb]).length} more`}</Button></div>
             </>
           )}
           {step === 3 && (
