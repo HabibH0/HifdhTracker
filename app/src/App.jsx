@@ -18,6 +18,7 @@ import Memorized from './screens/Memorized.jsx';
 import History from './screens/History.jsx';
 import Account from './screens/Account.jsx';
 import { startSync, syncNow } from './lib/cloud.js';
+import { startQueuedIfReady } from './lib/strengthen.js';
 import { setStatus } from './lib/store.js';
 import { Button } from './components/ui.jsx';
 import { useReminder } from './lib/reminder.js';
@@ -54,6 +55,8 @@ function Shell() {
   const { tab, visited, stack } = useNav();
   const topMode = stack.at(-1)?.mode;
   useReminder();
+  const { version } = useApp();
+  useEffect(() => { startQueuedIfReady(); }, [version]);
   return (
     <>
       <motion.div className="layer" style={{ zIndex: 1 }} animate={stack.length && topMode === 'push' ? { x: '-22%' } : stack.length && topMode === 'modal' ? { scale: 0.96 } : { x: 0, scale: 1 }} transition={spring}>

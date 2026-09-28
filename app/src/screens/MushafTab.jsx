@@ -7,6 +7,28 @@ import { GROUPS, NONE, groupInfo, juzStrength, pageStrength } from '../lib/stats
 import { Button, Pressable, Segmented, Tag, Stagger, staggerItem } from '../components/ui.jsx';
 import { Icon, Star } from '../components/Icons.jsx';
 import { preload } from '../lib/mushaf.js';
+import { activeCycle, queueStrengthen, strengthenNow, unqueueStrengthen } from '../lib/strengthen.js';
+import { confirmSheet } from '../components/ui.jsx';
+
+function StrengthenControl({ hizb, known }) {
+  const { engine, settings } = useApp();
+  if (!known) return null;
+  const id = `h${hizb}`, label = halfLabel(hizb), cycle = activeCycle(engine);
+  const queue = settings.strengthenQueue ?? [];
+  if (cycle?.halfJuzId === id) return <Tag tone="green" icon="layers">Strengthening · Day {cycle.stage} of 3</Tag>;
+  if (queue.includes(id)) return (
+    <div className="row-flex" style={{ justifyContent: 'space-between' }}>
+      <Tag tone="blue" icon="layers">Queued · {queue.indexOf(id) + 1} of {queue.length}</Tag>
+      <button className="link" onClick={() => unqueueStrengthen(id)}>Remove</button>
+    </div>
+  );
+  if (cycle) return <Button variant="secondary" size="sm" block onClick={() => { queueStrengthen(id); nav.toast(`${label} queued for strengthening`, 'layers'); }}>Strengthen next</Button>;
+  return <Button variant="soft" size="sm" block onClick={() => confirmSheet({
+    title: `Strengthen ${label}?`, body: 'It goes through the 3-day cycle starting today. Once started it can’t be cancelled, and no other section starts until it finishes.',
+    confirm: 'Start today', tone: 'primary',
+    onConfirm: () => { try { strengthenNow(id); nav.toast('Added to today’s plan · Day 1 of 3', 'layers'); } catch (e) { nav.toast(e.message, 'alert'); } },
+  })}><Icon name="layers" size={16} />Strengthen now</Button>;
+}
 
 export const tint = (color, pct = 22) => `color-mix(in srgb, ${color} ${pct}%, var(--card))`;
 const pad3 = n => String(n).padStart(3, '0');
@@ -52,6 +74,7 @@ export function juzSheet(j) {
                 ))}
               </div>
               {h.overdue > 0 && <div className="tiny" style={{ color: 'var(--amber-ink)' }}>{h.overdue} page{h.overdue === 1 ? '' : 's'} overdue for review</div>}
+              <StrengthenControl hizb={h.hizb} known={h.known.length > 0} />
             </div>
           );
         })}
