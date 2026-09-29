@@ -287,7 +287,15 @@ function moveWeak(sid, to) {
   commit();
 }
 
-function commit() { normalize(); refreshPlan(); save(); render(); }
+/** Apply a user change: tidy queues, refresh today's plan, persist, re-render and sync. */
+function commit() {
+  normalize();
+  refreshPlan();
+  state.updatedAt = Date.now();
+  save();
+  render();
+  markDirty();
+}
 
 /* ---------- Sample data ---------- */
 function loadSample() {
@@ -471,7 +479,9 @@ function renderToday() {
         <h2>Set up your hifdh</h2>
         <p>Mark which half-juz you've memorised and how each one feels. Your daily revision is built from there.</p>
         <button class="btn" data-action="start-setup">Classify sections</button>
-        <button class="link" data-action="sample">or try with sample data</button>
+        ${auth ? '' : `<div class="links">
+          <button class="link" data-action="auth-open">Sign in</button>·<button class="link" data-action="sample">Try sample data</button>
+        </div>`}
       </div>`;
   }
 
@@ -695,7 +705,19 @@ function renderSettings() {
   const juz = v => fmtJuz(v);
 
   const themes = ['system', 'light', 'dark'];
+  const account = auth ? `
+      <div class="card list">
+        <div class="item"><div class="item-main"><div class="t">${esc(auth.username)}</div><div class="s" id="sync-text">${syncText()}</div></div>
+          <span class="sync-dot ${syncStatus}" id="sync-dot"></span></div>
+        ${link('sync-now', 'Sync now')}
+        ${link('sign-out', 'Sign out', 'red')}
+      </div>` : `
+      <div class="card list">
+        <button class="item link-row" data-action="auth-open"><div class="item-main"><div class="t">Sign in</div>
+          <div class="s">Save your hifdh to your account and use it on any device</div></div>${I.chev}</button>
+      </div>`;
   return head('Planner', 'Settings') + `
+    <section class="block"><div class="group-title">Account</div>${account}</section>
     <section class="block"><div class="group-title">Appearance</div>
       ${segWrap('seg-theme', themes.indexOf(ui.theme), 3, themes.map(t =>
         `<button class="${ui.theme === t ? 'on' : ''}" data-action="theme" data-v="${t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join(''))}
@@ -726,11 +748,11 @@ function renderSettings() {
 
     <section class="block"><div class="group-title">Data</div>
       <div class="card list">
-        ${link('sample', 'Load sample hifdh')}
+        ${auth ? '' : link('sample', 'Load sample hifdh')}
         ${link('export', 'Export backup')}
         ${link('reset', 'Reset everything', 'red')}
       </div></section>
-    <p class="foot">Saved on this device only.</p>`;
+    <p class="foot">${auth ? 'Saved on this device and synced to your account.' : 'Saved on this device only.'}</p>`;
 }
 
 /* ---------- Sheets ---------- */
@@ -834,9 +856,264 @@ function openPromote(sid) {
 function openReset() {
   sheetSid = null;
   openSheet(`
-    <div class="sh-head"><h2>Reset everything?</h2><p>This clears every classification, queue and revision record on this device.</p></div>
+    <div class="sh-head"><h2>Reset everything?</h2><p>This clears every classification, queue and revision record ${auth ? 'on this device and in your account' : 'on this device'}.</p></div>
     <button class="btn danger" data-action="reset-yes">Reset</button>
     <div class="links"><button class="link" data-action="close-sheet">Cancel</button></div>`);
+}
+
+/* =========================================================================
+   Account & sync
+   The whole planner state is one document per account. Each save sends the
+   server version it was based on; if another device saved in between, the
+   copy changed most recently wins.
+   ========================================================================= */
+const API_URL = ['localhost', '127.0.0.1'].includes(location.hostname)
+  ? `http://${location.hostname}:8787`
+  : 'https://br-misty-base-b1vi3gxo-hifdhapi.compute.c-5.eu-central-1.aws.neon.tech';
+const AUTH_KEY = STORAGE_KEY + '.auth';
+const SYNC_KEY = STORAGE_KEY + '.sync';
+
+const readJSON = key => { try { return JSON.parse(localStorage.getItem(key)); } catch (e) { return null; } };
+const writeJSON = (key, v) => { try { v == null ? localStorage.removeItem(key) : localStorage.setItem(key, JSON.stringify(v)); } catch (e) {} };
+
+let auth = readJSON(AUTH_KEY);                 // { token, username, expiresAt }
+let sync = readJSON(SYNC_KEY) || { version: 0, dirty: false, lastSyncedAt: null };
+let syncStatus = 'idle';                       // idle | syncing | offline | error | paused
+let pendingRemote = null;                      // account copy awaiting "which data?" choice
+const deviceId = (() => {
+  let id = null;
+  try { id = localStorage.getItem(STORAGE_KEY + '.device'); } catch (e) {}
+  if (!id) {
+    id = Math.random().toString(36).slice(2, 10);
+    try { localStorage.setItem(STORAGE_KEY + '.device', id); } catch (e) {}
+  }
+  return id;
+})();
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const saveSync = () => writeJSON(SYNC_KEY, sync);
+const previewing = () => state.settings.dayOffset > 0;
+
+async function api(method, path, body) {
+  const res = await fetch(API_URL + path, {
+    method,
+    headers: { 'content-type': 'application/json', ...(auth ? { authorization: `Bearer ${auth.token}` } : {}) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = res.status === 204 ? null : await res.json().catch(() => null);
+  if (!res.ok) {
+    if (res.status === 401 && auth && path !== '/login' && path !== '/register') signedOut('Your session ended. Sign in again to keep syncing.');
+    const err = new Error(data?.message || 'Something went wrong.');
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+function setSyncStatus(s) {
+  syncStatus = s;
+  const text = document.getElementById('sync-text'), dot = document.getElementById('sync-dot');
+  if (text) text.textContent = syncText();
+  if (dot) dot.className = `sync-dot ${s}`;
+}
+function syncText() {
+  if (syncStatus === 'paused') return 'Sync paused while previewing days';
+  if (syncStatus === 'syncing') return 'Syncing…';
+  if (syncStatus === 'offline') return 'Offline — will sync when you’re back online';
+  if (syncStatus === 'error') return 'Couldn’t sync — try Sync now';
+  if (sync.dirty) return 'Changes waiting to sync';
+  if (!sync.lastSyncedAt) return 'Signed in';
+  const mins = Math.round((Date.now() - sync.lastSyncedAt) / 60000);
+  return mins < 1 ? 'Synced just now' : mins < 60 ? `Synced ${mins} min ago` : `Synced ${new Date(sync.lastSyncedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`;
+}
+
+/** The document sent to the account; the preview day offset stays on this device. */
+const payload = () => ({ ...state, settings: { ...state.settings, dayOffset: 0 } });
+
+function markDirty() {
+  if (!auth) return;
+  sync.dirty = true;
+  saveSync();
+  schedulePush();
+}
+
+let pushTimer = null, pushing = false;
+function schedulePush(delay = 1200) {
+  if (!auth) return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(pushNow, delay);
+}
+
+async function pushNow() {
+  if (!auth || !sync.dirty) return;
+  if (previewing()) return setSyncStatus('paused');
+  if (pushing) return schedulePush();
+  pushing = true;
+  setSyncStatus('syncing');
+  const sentAt = state.updatedAt;
+  try {
+    const r = await api('PUT', '/state', {
+      state: payload(), baseVersion: sync.version, deviceId,
+      updatedAt: new Date(state.updatedAt || Date.now()).toISOString(),
+    });
+    sync.version = r.version;
+    if (state.updatedAt === sentAt) sync.dirty = false;
+    sync.lastSyncedAt = Date.now();
+    saveSync();
+    setSyncStatus('idle');
+  } catch (e) {
+    if (e.status === 409 && e.data?.current) { resolveWith(e.data.current); setSyncStatus('idle'); }
+    else if (auth) setSyncStatus(e.status ? 'error' : 'offline');
+  } finally {
+    pushing = false;
+    if (auth && sync.dirty && syncStatus === 'idle') schedulePush(300);
+  }
+}
+
+/** Fetch the account copy; take it if it's newer, otherwise send ours. */
+async function pull() {
+  if (!auth) return;
+  if (previewing()) return setSyncStatus('paused');
+  setSyncStatus('syncing');
+  try {
+    const remote = await api('GET', '/state');
+    if (remote.version > sync.version) resolveWith(remote);
+    sync.lastSyncedAt = Date.now();
+    saveSync();
+    setSyncStatus('idle');
+    if (sync.dirty) pushNow();
+  } catch (e) {
+    if (auth) setSyncStatus(e.status ? 'error' : 'offline');
+  }
+}
+
+/** Another copy exists on the server: keep whichever was changed most recently. */
+function resolveWith(remote) {
+  const remoteAt = remote.updatedAt ? Date.parse(remote.updatedAt) : 0;
+  if (remote.state && (!sync.dirty || remoteAt > (state.updatedAt || 0))) {
+    const hadLocalChanges = sync.dirty;
+    adopt(remote);
+    if (hadLocalChanges) toast('Updated with newer changes from another device');
+  } else {
+    sync.version = remote.version;      // ours is newer: overwrite on the next push
+    sync.dirty = true;
+    saveSync();
+  }
+}
+
+/** Replace local state with the account copy. */
+function adopt(remote) {
+  const offset = state.settings.dayOffset;
+  const s = remote.state;
+  s.settings = { ...DEFAULT_SETTINGS, ...s.settings, dayOffset: offset };
+  s.updatedAt = remote.updatedAt ? Date.parse(remote.updatedAt) : Date.now();
+  state = s;
+  sync.version = remote.version;
+  sync.dirty = false;
+  saveSync();
+  normalize();
+  refreshPlan();
+  save();
+  render();
+}
+
+async function signIn(mode, username, password) {
+  const r = await api('POST', mode === 'register' ? '/register' : '/login', { username, password });
+  auth = { token: r.token, username: r.user.username, expiresAt: r.expiresAt };
+  writeJSON(AUTH_KEY, auth);
+  sync = { version: 0, dirty: false, lastSyncedAt: null };
+  saveSync();
+  const localHasData = sections().some(s => s.memorised);
+
+  if (!r.hasData) {
+    closeSheet();
+    render();
+    if (localHasData) { sync.dirty = true; saveSync(); await pushNow(); }
+    else sync.lastSyncedAt = Date.now();
+    toast(mode === 'register' ? 'Account created — your hifdh is backed up' : 'Signed in');
+    return;
+  }
+  const remote = await api('GET', '/state');
+  if (!localHasData) {
+    closeSheet();
+    adopt(remote);
+    sync.lastSyncedAt = Date.now();
+    saveSync();
+    toast('Welcome back — your hifdh is restored');
+    return;
+  }
+  pendingRemote = remote;
+  openChooseData(remote);
+  render();
+}
+
+function signedOut(msg) {
+  auth = null;
+  writeJSON(AUTH_KEY, null);
+  sync = { version: 0, dirty: false, lastSyncedAt: null };
+  writeJSON(SYNC_KEY, null);
+  clearTimeout(pushTimer);
+  setSyncStatus('idle');
+  render();
+  if (msg) toast(msg);
+}
+
+async function signOut() {
+  if (sync.dirty) await pushNow();
+  try { await api('POST', '/logout'); } catch (e) {}
+  signedOut('Signed out. Your data stays on this device.');
+}
+
+function openAuth(mode = 'login', keep = null) {
+  sheetSid = null;
+  const login = mode === 'login';
+  const b = (v, text) => `<button type="button" class="${mode === v ? 'on' : ''}" data-action="auth-mode" data-v="${v}">${text}</button>`;
+  openSheet(`
+    <div class="sh-head"><h2>${login ? 'Welcome back' : 'Create an account'}</h2>
+      <p>${login ? 'Sign in to sync your hifdh.' : 'Your planner is saved to your account and kept in sync on every device.'}</p></div>
+    ${segWrap('seg-auth', login ? 0 : 1, 2, b('login', 'Sign in') + b('register', 'Create account'))}
+    <form id="auth-form" data-mode="${mode}" novalidate>
+      <input class="input" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false"
+        placeholder="Username" value="${esc(keep?.username ?? auth?.username ?? '')}">
+      <input class="input" name="password" type="password" autocomplete="${login ? 'current-password' : 'new-password'}" placeholder="Password">
+      <p class="form-error" id="auth-error" role="alert"></p>
+      <button class="btn" type="submit">${login ? 'Sign in' : 'Create account'}</button>
+    </form>
+    ${login ? '' : '<p class="fine">3–32 letters, numbers, dots, dashes or underscores. Passwords need 8+ characters. There’s no password reset, so keep it somewhere safe.</p>'}`, !!keep);
+}
+
+async function submitAuth(form) {
+  const mode = form.dataset.mode;
+  const username = form.username.value.trim();
+  const password = form.password.value;
+  const error = document.getElementById('auth-error');
+  const btn = form.querySelector('button[type=submit]');
+  const fail = msg => { error.textContent = msg; error.classList.remove('shake'); void error.offsetWidth; error.classList.add('shake'); };
+  if (!username || !password) return fail('Enter a username and password.');
+  if (mode === 'register' && password.length < 8) return fail('Use at least 8 characters for your password.');
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = mode === 'login' ? 'Signing in…' : 'Creating account…';
+  error.textContent = '';
+  try {
+    await signIn(mode, username, password);
+  } catch (e) {
+    fail(e.status ? e.message : 'Can’t reach the server. Check your connection and try again.');
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+function openChooseData(remote) {
+  sheetSid = null;
+  const when = remote.updatedAt ? new Date(remote.updatedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'earlier';
+  openSheet(`
+    <div class="sh-head"><h2>Which data should we keep?</h2><p>Your account already has a saved planner, and this device has its own.</p></div>
+    <div class="card list opts">
+      ${opt('use-remote', null, 'Use my account’s data', `Last saved ${when}. Replaces what’s on this device.`)}
+      ${opt('use-local', null, 'Keep this device’s data', 'Overwrites the copy in your account.')}
+    </div>`);
 }
 
 /* ---------- Toast ---------- */
@@ -912,6 +1189,7 @@ const actions = {
     if (v < lim[0] || v > lim[1]) return;
     state.settings[d.key] = v;
     commit();
+    if (d.key === 'dayOffset' && v === 0 && auth) pull();
   },
   export: () => {
     const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
@@ -921,6 +1199,23 @@ const actions = {
     a.click();
   },
   reset: () => openReset(),
+  'auth-open': () => openAuth('login'),
+  'auth-mode': d => {
+    const form = document.getElementById('auth-form');
+    if (form && form.dataset.mode !== d.v) openAuth(d.v, { username: form.username.value });
+  },
+  'sync-now': () => { if (sync.dirty) pushNow(); else pull(); },
+  'sign-out': () => signOut(),
+  'use-remote': () => { closeSheet(); if (pendingRemote) adopt(pendingRemote); pendingRemote = null; toast('Loaded your account’s data'); },
+  'use-local': () => {
+    closeSheet();
+    if (pendingRemote) { sync.version = pendingRemote.version; pendingRemote = null; }
+    state.updatedAt = Date.now();
+    save();
+    markDirty();
+    pushNow();
+    toast('Your account now uses this device’s data');
+  },
   'reset-yes': () => { state = freshState(); closeSheet(); ui.tab = 'today'; commit(); toast('Everything reset'); },
 };
 
@@ -950,13 +1245,23 @@ document.addEventListener('click', e => {
   });
 })();
 
-// Roll the plan over when the app comes back after midnight.
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && state.plan && state.plan.date !== today()) commit();
+document.addEventListener('submit', e => {
+  if (e.target.id !== 'auth-form') return;
+  e.preventDefault();
+  submitAuth(e.target);
 });
+
+// Coming back to the app: roll the plan over after midnight and pick up other devices' changes.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { if (sync.dirty) pushNow(); return; }
+  if (state.plan && state.plan.date !== today()) { refreshPlan(); save(); render(); }
+  pull();
+});
+addEventListener('online', () => pull());
 
 applyTheme(ui.theme);
 normalize();
 refreshPlan();
 save();
 render();
+pull();
