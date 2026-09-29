@@ -1,9 +1,8 @@
-name: Deploy app to GitHub Pages
+name: Deploy to GitHub Pages
 
 on:
   push:
     branches: [main]
-    paths: ['app/**', 'src/**', 'shared/**', '.github/workflows/deploy-pages.yml']
   workflow_dispatch:
 
 permissions:
@@ -20,46 +19,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: |
-            app/package-lock.json
-            backend/package-lock.json
 
-      - name: Engine tests
-        run: npm test
-
-      - name: Backend and sync tests
+      # The app is plain static files — publish only what the browser needs.
+      - name: Collect site files
         run: |
-          npm ci --prefix backend
-          npm test --prefix backend
-
-      # The QCF V2 page fonts and layouts (~100 MB) are fetched from the Quran Foundation, not committed.
-      - name: Restore Mushaf data
-        uses: actions/cache@v4
-        with:
-          path: |
-            app/public/mushaf
-            app/scripts/.cache
-          key: mushaf-${{ hashFiles('app/scripts/fetch-mushaf.mjs') }}
-
-      - name: Build
-        run: |
-          npm ci --prefix app
-          npm run fetch-mushaf --prefix app
-          npm run build --prefix app
-        env:
-          # Repository variable: the deployed Neon Function URL. Empty = local-only build.
-          VITE_API_URL: ${{ vars.VITE_API_URL }}
-          # Project sites live under /<repository>/; set VITE_BASE to "/" for a custom domain.
-          VITE_BASE: ${{ vars.VITE_BASE || format('/{0}/', github.event.repository.name) }}
+          mkdir _site
+          cp index.html app.js styles.css _site/
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: app/dist
+          path: _site
 
   deploy:
     needs: build

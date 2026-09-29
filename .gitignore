@@ -1,7 +1,3 @@
-node_modules/
-coverage/
-revision-data.json
-revision-data.json.lock
-revision-data.json.*.tmp
-.basecheck/
+__pycache__/
 .claude/settings.local.json
+.DS_Store
