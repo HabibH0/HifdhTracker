@@ -53,7 +53,10 @@ const I = {
 
 /* ---------- State ---------- */
 let state = load();
-let ui = { tab: 'today', queueTab: 'weak', selecting: false, selected: new Set(), theme: 'system', justDone: null };
+let ui = {
+  tab: 'today', queueTab: 'weak', hifdhView: 'map', selecting: false, selected: new Set(),
+  logSel: new Set(), barSel: null, theme: 'system', justDone: null,
+};
 try {
   ui.tab = localStorage.getItem(STORAGE_KEY + '.tab') || 'today';
   ui.theme = localStorage.getItem(STORAGE_KEY + '.theme') || 'system';
@@ -69,20 +72,35 @@ function freshState() {
     sections[id] = {
       id, memorised: false, strength: 'weak', confidence: 'unconfident',
       cycleDone: 0, extraDays: 0, confRevs: 0,
-      lastRevised: null, revisionCount: 0, enteredAt: 0,
+      lastRevised: null, revisionCount: 0, enteredAt: 0, tie: Math.random(),
     };
   }
-  return { settings: { ...DEFAULT_SETTINGS }, sections, weakQueue: [], plan: null };
+  return {
+    settings: { ...DEFAULT_SETTINGS }, sections, weakQueue: [], plan: null,
+    log: [],                                  // every recitation: { d: 'YYYY-MM-DD', s: sectionId, k: 'plan' | 'extra' }
+    counters: { cycles: 0, promotions: 0 },
+  };
+}
+
+/** Fill in fields added after a state was first saved (older devices, account copies). */
+function upgrade(s) {
+  s.settings = { ...DEFAULT_SETTINGS, ...s.settings };
+  s.counters = { cycles: 0, promotions: 0, ...s.counters };
+  for (const sec of Object.values(s.sections)) if (typeof sec.tie !== 'number') sec.tie = Math.random();
+  if (!Array.isArray(s.log)) {
+    // No history yet: seed one entry per section from its last revision so stats start sensibly.
+    s.log = Object.values(s.sections)
+      .filter(sec => sec.memorised && sec.lastRevised)
+      .map(sec => ({ d: sec.lastRevised, s: sec.id, k: 'plan' }))
+      .sort((a, b) => a.d.localeCompare(b.d));
+  }
+  return s;
 }
 
 function load() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const s = JSON.parse(raw);
-      s.settings = { ...DEFAULT_SETTINGS, ...s.settings };
-      return s;
-    }
+    if (raw) return upgrade(JSON.parse(raw));
   } catch (e) {}
   return freshState();
 }
@@ -138,16 +156,20 @@ const sections = () => Object.values(state.sections);
 const inCat = c => sections().filter(s => cat(s) === c);
 const cycleTarget = s => state.settings.cycleLength + (s.extraDays || 0);
 
-/** Rotation order for confidence / maintenance: longest-unrevised first. */
+/**
+ * Rotation order for confidence / maintenance: longest-unrevised first. Ties are broken by each
+ * section's random `tie`, which is redrawn whenever it's revised, so equal sections come up in
+ * a fresh random order each time round (but the order doesn't jump between renders).
+ */
 function rotation(c) {
-  return inCat(c).sort((a, b) =>
-    (a.lastRevised || '').localeCompare(b.lastRevised || '') || a.enteredAt - b.enteredAt || a.id - b.id);
+  return inCat(c).sort((a, b) => (a.lastRevised || '').localeCompare(b.lastRevised || '') || a.tie - b.tie);
 }
 
 function normalize() {
   const weakIds = new Set(inCat('weak').map(s => s.id));
   state.weakQueue = state.weakQueue.filter(id => weakIds.has(id));
-  for (const s of inCat('weak').sort((a, b) => a.id - b.id)) {
+  // Sections newly marked weak together join the queue in random order.
+  for (const s of inCat('weak').sort((a, b) => a.tie - b.tie)) {
     if (!state.weakQueue.includes(s.id)) state.weakQueue.push(s.id);
   }
 }
@@ -160,8 +182,10 @@ function classify(id, patch) {
   const after = cat(s);
   if (before !== after) {
     s.enteredAt = Date.now();
+    s.tie = Math.random();
     if (after === 'conf') s.confRevs = 0;
     if (after === 'weak') { s.cycleDone = 0; s.extraDays = 0; }
+    if (before === 'conf' && after === 'maint') state.counters.promotions++;
   }
   normalize();
 }
@@ -226,28 +250,47 @@ function queuePosition(s) {
   return rotation(c).findIndex(x => x.id === s.id) + 1;
 }
 
-/* ---------- Actions on sections ---------- */
-function completeItem(sid) {
-  const it = planItem(sid);
-  if (!it || it.done) return;
-  const s = state.sections[sid];
-  it.prev = { lastRevised: s.lastRevised, revisionCount: s.revisionCount, cycleDone: s.cycleDone, confRevs: s.confRevs };
-  it.done = true;
+/* ---------- Recording revisions ---------- */
+
+/** Mark a section revised today and log it. Doesn't commit. */
+function recordRevision(s, kind) {
   s.lastRevised = today();
   s.revisionCount++;
+  s.tie = Math.random();
+  state.log.push({ d: today(), s: s.id, k: kind });
+}
+
+/**
+ * Tick off today's planned item for a section. Returns the follow-up prompt it earns, if any:
+ * 'cycle-end' when a strengthening cycle completes, 'promote' at the confidence check-in.
+ */
+function applyCompletion(sid) {
+  const it = planItem(sid);
+  if (!it || it.done) return null;
+  const s = state.sections[sid];
+  it.prev = { lastRevised: s.lastRevised, revisionCount: s.revisionCount, cycleDone: s.cycleDone, confRevs: s.confRevs, tie: s.tie };
+  it.done = true;
+  recordRevision(s, 'plan');
   if (it.cat === 'weak') s.cycleDone++;
   if (it.cat === 'conf') s.confRevs++;
+  if (it.cat === 'weak' && s.cycleDone >= cycleTarget(s)) return 'cycle-end';
+  if (it.cat === 'conf' && s.confRevs === state.settings.promoteAfter) return 'promote';
+  return null;
+}
+
+function showPrompt(prompt, sid) {
+  if (prompt === 'cycle-end') setTimeout(() => openCycleEnd(sid), 350);
+  if (prompt === 'promote') setTimeout(() => openPromote(sid), 350);
+}
+
+function completeItem(sid) {
+  const prompt = applyCompletion(sid);
+  if (!planItem(sid)?.done) return;
   ui.justDone = sid;
   commit();
   haptic();
-
-  if (it.cat === 'weak' && s.cycleDone >= cycleTarget(s)) {
-    setTimeout(() => openCycleEnd(sid), 350);
-  } else if (it.cat === 'conf' && s.confRevs === state.settings.promoteAfter) {
-    setTimeout(() => openPromote(sid), 350);
-  } else {
-    toast(`${title(sid)} revised`, () => undoItem(sid));
-  }
+  if (prompt) showPrompt(prompt, sid);
+  else toast(`${title(sid)} revised`, () => undoItem(sid));
 }
 
 function undoItem(sid) {
@@ -256,13 +299,53 @@ function undoItem(sid) {
   Object.assign(state.sections[sid], it.prev);
   it.done = false;
   delete it.prev;
+  // Drop the most recent planned log entry for this section today.
+  for (let i = state.log.length - 1; i >= 0; i--) {
+    const e = state.log[i];
+    if (e.s === sid && e.d === today() && e.k === 'plan') { state.log.splice(i, 1); break; }
+  }
   commit();
 }
+
+/**
+ * Log recitations that weren't (or weren't all) on today's plan. A section still pending on
+ * today's plan is simply ticked off; anything else counts as an extra revision, which moves it
+ * to the back of its rotation and counts towards confidence building.
+ */
+function logRecitations(ids) {
+  const snapshot = JSON.stringify(state);
+  let prompt = null, promptSid = null;
+  for (const sid of ids) {
+    const it = planItem(sid);
+    let p = null;
+    if (it && !it.done) p = applyCompletion(sid);
+    else {
+      const s = state.sections[sid];
+      recordRevision(s, 'extra');
+      if (cat(s) === 'conf') {
+        s.confRevs++;
+        if (s.confRevs === state.settings.promoteAfter) p = 'promote';
+      }
+    }
+    if (p && !prompt) { prompt = p; promptSid = sid; }
+  }
+  commit();
+  haptic();
+  const pagesTotal = ids.reduce((n, id) => n + pageCount(id), 0);
+  if (prompt) showPrompt(prompt, promptSid);
+  else toast(`Logged ${ids.length === 1 ? title(ids[0]) : `${ids.length} half-juz`} · ${pagesTotal} pages`, () => {
+    state = upgrade(JSON.parse(snapshot));
+    commit();
+  });
+}
+
+const pageCount = id => { const [a, b] = pages(id); return b - a + 1; };
 
 function finishCycle(sid) {
   const s = state.sections[sid];
   classify(sid, { strength: 'strong', confidence: 'unconfident' });
   s.cycleDone = 0; s.extraDays = 0;
+  state.counters.cycles++;
   commit();
   const next = state.weakQueue[0];
   toast(next ? `Marked strong. Next up: ${title(next)}` : 'Marked strong. Weak queue is clear.');
@@ -297,6 +380,84 @@ function commit() {
   markDirty();
 }
 
+/* ---------- Forecast & stats ---------- */
+
+/**
+ * Simulate the schedule forward to estimate when every memorised section is strong + confident.
+ * Assumes each strengthening cycle ends on time and sections are confirmed confident at the
+ * check-in. Returns { days, date, ready } — days of revision left counting today — or
+ * { never: true } if the settings leave no room for confidence building.
+ */
+function greenForecast() {
+  const st = state.settings;
+  const t = today();
+  const ready = inCat('conf').filter(s => s.confRevs >= st.promoteAfter).length;
+  const weak = state.weakQueue.map(id => ({ id, left: cycleTarget(state.sections[id]) - state.sections[id].cycleDone }));
+  const conf = rotation('conf').filter(s => s.confRevs < st.promoteAfter)
+    .map(s => ({ id: s.id, need: st.promoteAfter - s.confRevs }));
+  if (!weak.length && !conf.length) return { days: 0, date: t, ready };
+  if (!st.confPerDay) return { never: true, ready };
+
+  const done = state.plan.items.filter(i => i.done);
+  const weakCap0 = done.some(i => i.cat === 'weak') ? 0 : 1;
+  const confCap0 = Math.max(0, st.confPerDay - done.filter(i => i.cat === 'conf').length);
+  const graduate = w => conf.push({ id: w.id, need: st.promoteAfter });
+  while (weak.length && weak[0].left <= 0) graduate(weak.shift());
+
+  for (let day = 0; day < 3650; day++) {
+    if (!weak.length && !conf.length) return { days: day, date: addDays(t, Math.max(0, day - 1)), ready };
+    const confCap = day === 0 ? confCap0 : st.confPerDay;
+    const picked = conf.splice(0, Math.min(confCap, conf.length));
+    picked.forEach(x => { if (--x.need > 0) conf.push(x); });
+    if ((day === 0 ? weakCap0 : 1) && weak.length && --weak[0].left <= 0) graduate(weak.shift());
+  }
+  return { never: true, ready };
+}
+
+/** Everything the stats view shows, derived from the recitation log and current state. */
+function computeStats() {
+  const log = state.log;
+  const t = today();
+
+  // Khatms: sequential complete readings. Repeats of a section already covered in the current
+  // reading don't count towards the next one — a reading must finish before the next starts.
+  let khatms = 0, lastKhatm = null;
+  const covered = new Set();
+  for (const e of log) {
+    covered.add(e.s);
+    if (covered.size === 60) { khatms++; lastKhatm = e.d; covered.clear(); }
+  }
+
+  const pagesByDay = new Map();
+  for (const e of log) pagesByDay.set(e.d, (pagesByDay.get(e.d) || 0) + pageCount(e.s));
+  const days = [...pagesByDay.keys()].sort();
+  const totalPages = [...pagesByDay.values()].reduce((a, b) => a + b, 0);
+
+  // Streaks of consecutive days with at least one recitation. Today not yet counted doesn't break it.
+  let best = 0, run = 0, prev = null;
+  for (const d of days) { run = prev && diffDays(prev, d) === 1 ? run + 1 : 1; best = Math.max(best, run); prev = d; }
+  let current = 0;
+  for (let d = pagesByDay.has(t) ? t : addDays(t, -1); pagesByDay.has(d); d = addDays(d, -1)) current++;
+
+  const last30 = Array.from({ length: 30 }, (_, i) => pagesByDay.get(addDays(t, -i)) || 0);
+  const firstDay = days[0];
+  const span = firstDay ? Math.min(30, diffDays(firstDay, t) + 1) : 0;
+  const avg30 = span ? last30.slice(0, span).reduce((a, b) => a + b, 0) / span : 0;
+
+  const rank = { maint: 3, conf: 2, weak: 1 };
+  const memorised = sections().filter(s => s.memorised);
+  const strongest = [...memorised].sort((a, b) =>
+    rank[cat(b)] - rank[cat(a)] || b.revisionCount - a.revisionCount || a.id - b.id).slice(0, 5);
+  const stalest = memorised.filter(s => cat(s) !== 'weak')
+    .sort((a, b) => (a.lastRevised || '').localeCompare(b.lastRevised || '') || a.id - b.id).slice(0, 3);
+
+  return {
+    khatms, lastKhatm, khatmProgress: covered.size, totalPages, recitations: log.length,
+    current, best, avg30, pagesByDay, strongest, stalest,
+    memorisedCount: memorised.length, confidentCount: inCat('maint').length,
+  };
+}
+
 /* ---------- Sample data ---------- */
 function loadSample() {
   state = freshState();
@@ -320,6 +481,13 @@ function loadSample() {
   state.weakQueue = [10, 5, 6, 53];
   const cur = state.sections[10];
   cur.cycleDone = 1; cur.lastRevised = addDays(t, -1); cur.revisionCount = 1;
+  // A month of recitation history (with a couple of missed days) so the stats have something to show.
+  const ids = sections().filter(s => s.memorised).map(s => s.id);
+  for (let back = 29; back >= 1; back--) {
+    if (back === 12 || back === 20) continue;
+    const n = 2 + (back * 7) % 3;
+    for (let k = 0; k < n; k++) state.log.push({ d: addDays(t, -back), s: ids[(back * 5 + k * 3) % ids.length], k: k < 3 ? 'plan' : 'extra' });
+  }
   commit();
   toast('Sample hifdh loaded');
 }
@@ -497,9 +665,26 @@ function renderToday() {
         <span ${anim('prog-t', 'bump', done)}>${complete ? 'All done today' : `${fmtNum(done / 2)} of ${fmtNum(total / 2)} juz`}</span></div>
       <div class="bar"><i ${anim('progress', 'w', pct * 100)}></i></div>
     </div>
+    ${etaLine()}
     ${weakBlock()}
     ${listBlock('conf', 'Confidence', state.settings.confPerDay)}
-    ${listBlock('maint', 'Maintenance', state.settings.maintPerDay)}`;
+    ${listBlock('maint', 'Maintenance', state.settings.maintPerDay)}
+    <button class="log-btn" data-action="log-open" data-flip="log-btn">${I.plus}<span>Log a recitation</span></button>`;
+}
+
+/** "N days until everything is green" — see greenForecast(). */
+function etaLine() {
+  const f = greenForecast();
+  const readyText = f.ready ? `${f.ready} section${f.ready > 1 ? 's' : ''} ready to mark confident` : '';
+  let main, right = '';
+  if (f.never) main = 'Confidence building is set to 0 — nothing turns green';
+  else if (!f.days && !f.ready) main = '<b>Everything is green</b> — all memorised sections are confident';
+  else if (!f.days) main = `<b>${readyText}</b>`;
+  else {
+    main = `<b ${anim('eta-d', 'bump', f.days)}>${f.days} day${f.days > 1 ? 's' : ''}</b> until everything is green`;
+    right = parse(f.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  }
+  return `<button class="eta" data-action="eta-info" data-flip="eta">${dot('maint')}<span>${main}</span><span class="r">${right}</span></button>`;
 }
 
 function weakBlock() {
@@ -651,11 +836,16 @@ function renderMap() {
   sections().forEach(s => counts[cat(s)]++);
   const cur = state.weakQueue[0];
   const names = { weak: 'Weak', conf: 'Unconfident', maint: 'Confident', none: 'Not memorised' };
-  let html = head(`${fmtJuz(60 - counts.none)} of 30 juz memorised`, 'My hifdh',
+  const statsView = ui.hifdhView === 'stats';
+  let html = head(`${fmtJuz(60 - counts.none)} of 30 juz memorised`, 'My hifdh', statsView ? '' :
     `<button class="head-action ${ui.selecting ? 'on' : ''}" data-action="toggle-select">${ui.selecting ? 'Done' : 'Select'}</button>`);
-  html += `<div class="legend">${Object.keys(names).map(c => `<span>${dot(c)}${names[c]} <b>${counts[c]}</b></span>`).join('')}</div>`;
+  html += segWrap('seg-hifdh', statsView ? 1 : 0, 2,
+    `<button class="${statsView ? '' : 'on'}" data-action="hifdh-view" data-v="map">Map</button>` +
+    `<button class="${statsView ? 'on' : ''}" data-action="hifdh-view" data-v="stats">Stats</button>`);
+  if (statsView) return html + renderStats();
+  html += `<div class="legend qa">${Object.keys(names).map(c => `<span>${dot(c)}${names[c]} <b>${counts[c]}</b></span>`).join('')}</div>`;
   if (ui.selecting) html += `<p class="map-hint">Tap halves to select them, then choose a state below.</p>`;
-  html += `<div class="grid">`;
+  html += `<div class="grid qa">`;
   for (let j = 1; j <= 30; j++) {
     const half = s => `<button class="half ${cat(s)} ${ui.selected.has(s.id) ? 'sel' : ''} ${s.id === cur ? 'cur' : ''}" ${anim(`h-${s.id}`, 'bump', `${cat(s)}${ui.selected.has(s.id) ? '-s' : ''}`)}
       data-action="${ui.selecting ? 'sel' : 'open'}" data-sid="${s.id}" aria-label="${title(s.id)}"></button>`;
@@ -664,6 +854,150 @@ function renderMap() {
   html += `</div>`;
   if (ui.selecting) html += `<div style="height:120px"></div>`;
   return html;
+}
+
+/* ---------- Stats ---------- */
+function renderStats() {
+  const st = computeStats();
+  const f = greenForecast();
+  const tile = (k, v, sub, key) => `<div class="tile"><div class="k">${k}</div><div class="v" ${anim(key, 'bump', v)}>${v}</div><div class="sub">${sub}</div></div>`;
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const sectionRow = (s, meta) => `
+    <div class="item"><span class="dot ${cat(s)}"></span>
+      <button class="item-main" data-action="open" data-sid="${s.id}"><div class="t">${title(s.id)}</div><div class="s">${juzName(s.id)}</div></button>
+      <span class="meta">${meta}</span></div>`;
+  const kv = (k, v) => `<div class="item"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+  const kPct = st.khatmProgress / 60 * 100;
+
+  const green = f.never ? 'Confidence building is off'
+    : !f.days ? (f.ready ? `${plural(f.ready, 'section')} ready to confirm` : 'Everything is green')
+    : `${plural(f.days, 'day')} · by ${parse(f.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}`;
+
+  return `
+    <section class="block qa"><div class="group-title">Khatms</div>
+      <div class="card focus khatm">
+        <div class="khatm-top"><span class="big" ${anim('khatms', 'bump', st.khatms)}>${st.khatms}</span>
+          <span class="muted">${st.khatms === 1 ? 'complete reading' : 'complete readings'}</span></div>
+        <div class="bar"><i ${anim('khatm-p', 'w', kPct)} style="background:var(--maint)"></i></div>
+        <div class="khatm-sub"><span>Current reading: ${st.khatmProgress} of 60 half-juz</span><span>${fmtJuz(60 - st.khatmProgress)} juz to go</span></div>
+        <p class="fine" style="margin-top:12px">A khatm counts once every half-juz has been recited. Repeats of a section already covered in this reading don't count towards the next one.${st.lastKhatm ? ` Last completed ${parse(st.lastKhatm).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}.` : ''}</p>
+      </div></section>
+
+    <section class="block qa"><div class="tiles">
+      ${tile('Current streak', plural(st.current, 'day'), st.current ? 'in a row' : 'recite today to start', 'st-cur')}
+      ${tile('Best streak', plural(st.best, 'day'), 'longest run', 'st-best')}
+      ${tile('Pages revised', st.totalPages.toLocaleString('en-GB'), `${plural(st.recitations, 'recitation')}`, 'st-pages')}
+      ${tile('Daily average', `${Math.round(st.avg30)} pp`, 'last 30 days', 'st-avg')}
+    </div></section>
+
+    <section class="block qa"><div class="group-title">Pages per day</div>
+      <div class="card chart-card">${pagesChart(st.pagesByDay, 14)}</div></section>
+
+    <section class="block qa"><div class="group-title">Path to green</div>
+      <div class="card list kv">
+        ${kv('All green in', green)}
+        ${kv(`${dot('weak')} Weak`, plural(inCat('weak').length, 'section'))}
+        ${kv(`${dot('conf')} Building confidence`, plural(inCat('conf').length, 'section'))}
+        ${kv(`${dot('maint')} Confident`, `${st.confidentCount} of ${st.memorisedCount}`)}
+      </div></section>
+
+    ${st.strongest.length ? `<section class="block qa"><div class="group-title">Strongest sections</div>
+      <div class="card list">${st.strongest.map(s => sectionRow(s, plural(s.revisionCount, 'revision'))).join('')}</div></section>` : ''}
+
+    ${st.stalest.length ? `<section class="block qa"><div class="group-title">Longest since revised</div>
+      <div class="card list">${st.stalest.map(s => sectionRow(s, shortAgo(s.lastRevised))).join('')}</div></section>` : ''}
+
+    <section class="block qa"><div class="group-title">Milestones</div>
+      <div class="card list kv">
+        ${kv('Juz memorised', `${fmtJuz(st.memorisedCount)} of 30`)}
+        ${kv('Strengthening cycles finished', state.counters.cycles)}
+        ${kv('Sections made confident', state.counters.promotions)}
+        ${kv('Recitations logged', st.recitations)}
+      </div></section>`;
+}
+
+/** Bar chart of pages revised per day. Tap a bar to read its value. */
+function pagesChart(pagesByDay, days) {
+  const t = today();
+  const data = Array.from({ length: days }, (_, i) => {
+    const d = addDays(t, i - days + 1);
+    return { d, v: pagesByDay.get(d) || 0 };
+  });
+  const sel = ui.barSel == null ? days - 1 : Math.min(ui.barSel, days - 1);
+  const avg = data.reduce((a, x) => a + x.v, 0) / days;
+  const top = Math.max(10, Math.ceil(Math.max(...data.map(x => x.v)) / 10) * 10);
+  const W = 320, H = 150, L = 26, R = 2, T = 8, B = 22;
+  const pw = W - L - R, ph = H - T - B, slot = pw / days, bw = slot - 4;
+  const y = v => T + ph - (v / top) * ph;
+  const barPath = (x, yTop, w, h) => {
+    const r = Math.min(4, w / 2, h);
+    return `M${x},${yTop + h}V${yTop + r}Q${x},${yTop} ${x + r},${yTop}H${x + w - r}Q${x + w},${yTop} ${x + w},${yTop + r}V${yTop + h}Z`;
+  };
+  const label = d => d === t ? 'Today' : parse(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+
+  const grid = [0, top / 2, top].map(v => `
+    <line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" class="grid-line"/>
+    <text x="${L - 6}" y="${y(v) + 3.5}" class="axis" text-anchor="end">${v}</text>`).join('');
+  const bars = data.map((x, i) => {
+    const bx = L + i * slot + 2;
+    const h = (x.v / top) * ph;
+    const mark = x.v ? `<path d="${barPath(bx, y(x.v), bw, h)}" class="bar-mark ${i === sel ? 'sel' : ''}" data-i="${i}" style="--b:${i}"/>`
+      : `<rect x="${bx}" y="${T + ph - 2}" width="${bw}" height="2" rx="1" class="bar-zero"/>`;
+    return `${mark}<rect x="${L + i * slot}" y="${T}" width="${slot}" height="${ph + B}" class="bar-hit" data-action="bar" data-i="${i}"
+      data-label="${label(x.d)}" data-v="${x.v}"><title>${label(x.d)}: ${x.v} pages</title></rect>`;
+  }).join('');
+  const xl = [0, Math.floor(days / 2), days - 1].map(i =>
+    `<text x="${L + i * slot + slot / 2}" y="${H - 6}" class="axis" text-anchor="${i === 0 ? 'start' : i === days - 1 ? 'end' : 'middle'}">${label(data[i].d)}</text>`).join('');
+
+  return `
+    <div class="readout"><span id="bar-readout"><b>${data[sel].v} pages</b> · ${label(data[sel].d)}</span>
+      <span class="muted">avg ${Math.round(avg)}/day</span></div>
+    <svg viewBox="0 0 ${W} ${H}" class="chart" role="img" aria-label="Pages revised per day over the last ${days} days, averaging ${Math.round(avg)} pages a day">
+      ${grid}${bars}${xl}
+    </svg>`;
+}
+
+/* ---------- Log a recitation ---------- */
+function openLog(refresh = false) {
+  sheetSid = null;
+  const sel = ui.logSel;
+  const doneToday = new Set(state.log.filter(e => e.d === today()).map(e => e.s));
+  const pagesSel = [...sel].reduce((n, id) => n + pageCount(id), 0);
+  let grid = '';
+  for (let j = 1; j <= 30; j++) {
+    const a = state.sections[j * 2 - 1], b = state.sections[j * 2];
+    if (!a.memorised && !b.memorised) continue;
+    const half = s => `<button class="half ${cat(s)} ${sel.has(s.id) ? 'sel' : ''} ${doneToday.has(s.id) ? 'rt' : ''}"
+      ${anim(`lg-${s.id}`, 'bump', sel.has(s.id) ? 1 : 0)} data-action="log-sel" data-sid="${s.id}" ${s.memorised ? '' : 'disabled'}
+      aria-label="${title(s.id)}"></button>`;
+    grid += `<div class="juz"><div class="jn">${j}</div><div class="halves">${half(a)}${half(b)}</div></div>`;
+  }
+  openSheet(`
+    <div class="sh-head"><h2>Log a recitation</h2>
+      <p>Pick the half-juz you recited today, scheduled or not. It counts towards your stats and moves the section to the back of its queue.</p></div>
+    <div class="grid log-grid">${grid}</div>
+    ${doneToday.size ? '<p class="fine log-key"><span class="rt-key"></span>Already recited today</p>' : '<div style="height:6px"></div>'}
+    <button class="btn" data-action="log-save" ${sel.size ? '' : 'disabled'}>
+      ${sel.size ? `Log ${sel.size} half-juz · ${pagesSel} pages` : 'Select what you recited'}</button>`, refresh);
+}
+
+function openEtaInfo() {
+  sheetSid = null;
+  const f = greenForecast();
+  const st = state.settings;
+  const weakDays = state.weakQueue.reduce((n, id) => n + Math.max(0, cycleTarget(state.sections[id]) - state.sections[id].cycleDone), 0);
+  const confNeed = inCat('conf').reduce((n, s) => n + Math.max(0, st.promoteAfter - s.confRevs), 0);
+  openSheet(`
+    <div class="sh-head"><h2>Path to green</h2>
+      <p>${f.never ? 'Confidence building is set to 0 in Settings, so sections never become confident.'
+        : f.days ? `About ${f.days} day${f.days > 1 ? 's' : ''} of revision until every memorised section is strong and confident.`
+        : 'Every memorised section is strong and confident.'}</p></div>
+    <div class="card list kv">
+      <div class="item"><span class="k">${dot('weak')} Strengthening left</span><span class="v">${weakDays} day${weakDays === 1 ? '' : 's'} · ${state.weakQueue.length} section${state.weakQueue.length === 1 ? '' : 's'}</span></div>
+      <div class="item"><span class="k">${dot('conf')} Confidence revisions left</span><span class="v">${confNeed}</span></div>
+      <div class="item"><span class="k">${dot('maint')} Ready to confirm</span><span class="v">${f.ready}</span></div>
+    </div>
+    <p class="fine">Assumes one strengthening cycle at a time finishing on schedule, ${fmtJuz(st.confPerDay)} juz of confidence building a day, and each section confirmed confident after ${st.promoteAfter} revisions. Sections that finish strengthening join the confidence rotation. Extra recitations make it sooner.</p>`);
 }
 
 /**
@@ -1005,8 +1339,8 @@ function resolveWith(remote) {
 /** Replace local state with the account copy. */
 function adopt(remote) {
   const offset = state.settings.dayOffset;
-  const s = remote.state;
-  s.settings = { ...DEFAULT_SETTINGS, ...s.settings, dayOffset: offset };
+  const s = upgrade(remote.state);
+  s.settings.dayOffset = offset;
   s.updatedAt = remote.updatedAt ? Date.parse(remote.updatedAt) : Date.now();
   state = s;
   sync.version = remote.version;
@@ -1199,6 +1533,31 @@ const actions = {
     a.click();
   },
   reset: () => openReset(),
+  'hifdh-view': d => {
+    if (ui.hifdhView === d.v) return;
+    ui.hifdhView = d.v;
+    ui.selecting = false;
+    ui.selected.clear();
+    ui.barSel = null;
+    render({ sub: true });
+  },
+  bar: d => {
+    ui.barSel = +d.i;
+    document.querySelectorAll('.bar-mark').forEach(m => m.classList.toggle('sel', m.dataset.i === d.i));
+    const hit = document.querySelector(`.bar-hit[data-i="${d.i}"]`);
+    const out = document.getElementById('bar-readout');
+    if (hit && out) out.innerHTML = `<b>${hit.dataset.v} pages</b> · ${hit.dataset.label}`;
+  },
+  'eta-info': () => openEtaInfo(),
+  'log-open': () => { ui.logSel = new Set(); openLog(); },
+  'log-sel': d => { const id = +d.sid; ui.logSel.has(id) ? ui.logSel.delete(id) : ui.logSel.add(id); openLog(true); },
+  'log-save': () => {
+    const ids = [...ui.logSel].sort((a, b) => a - b);
+    if (!ids.length) return;
+    ui.logSel = new Set();
+    closeSheet();
+    logRecitations(ids);
+  },
   'auth-open': () => openAuth('login'),
   'auth-mode': d => {
     const form = document.getElementById('auth-form');
