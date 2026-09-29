@@ -85,7 +85,7 @@ function TaskCard({ task, done, active, onOpen }) {
   const inProgress = active && active.taskKey === task.key && active.phase !== 'intro' && active.phase !== 'complete';
   return (
     <motion.div layout="position" transition={softSpring} initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96 }}>
-      <Pressable className="card" onClick={done ? undefined : onOpen}
+      <Pressable className="card" onClick={done ? () => nav.push('sessionMistakes', { sessionId: task.sessionId }) : onOpen}
         style={{ display: 'flex', gap: 14, padding: 16, width: '100%', textAlign: 'left', alignItems: 'center', opacity: done ? 0.72 : 1 }}>
         <div style={{ width: 44, height: 44, borderRadius: 14, display: 'grid', placeItems: 'center', flexShrink: 0, background: done ? 'var(--pri)' : toneVar[type.tone], color: done ? 'var(--pri-ink)' : toneInk[type.tone] }}>
           <Icon name={done ? 'check' : type.icon} size={22} stroke={done ? 2.4 : 1.9} />
@@ -181,6 +181,7 @@ export default function Today() {
         </motion.div>
 
         {orphan && <UnfinishedBanner session={orphan} />}
+        <Button variant="secondary" block style={{ marginTop: 16 }} onClick={() => nav.push('revisionSections')}>Manage revision · relearn & maintain</Button>
 
         {plan.pending.length > 0 && <div className="section-title"><h3>Plan</h3><span className="tiny">{plan.pending.length} task{plan.pending.length === 1 ? '' : 's'}</span></div>}
         <div className="stack gap-12">

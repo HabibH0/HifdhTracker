@@ -68,6 +68,20 @@ function JuzMode({ sel, toggle, known }) {
   );
 }
 
+function HalfJuzMode({ sel, setPages, known }) {
+  return <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+    {HIZB_PAGES.map((pages, i) => {
+      const on = pages.every(p => sel.pages.has(p));
+      const fraction = pages.reduce((sum, p) => sum + pageKnown(p, known), 0) / pages.length;
+      return <Tile key={i} label={`Juz ${Math.floor(i / 2) + 1}`} sub={i % 2 ? 'Second half' : 'First half'} on={on} fraction={fraction} onClick={() => setPages(prev => {
+        const next = new Set(prev);
+        pages.forEach(p => on ? next.delete(p) : next.add(p));
+        return next;
+      })} />;
+    })}
+  </div>;
+}
+
 function SurahMode({ sel, toggle, known }) {
   return (
     <div className="card list" style={{ overflow: 'hidden' }}>
@@ -198,9 +212,10 @@ export default function MaterialPicker({ value, onChange, known = new Set() }) {
   const props = { sel: value, toggle, known, setPages, setRanges };
   return (
     <div className="stack gap-12">
-      <Segmented light value={mode} onChange={setMode} options={[{ value: 'juz', label: 'Juz' }, { value: 'surah', label: 'Surah' }, { value: 'page', label: 'Pages' }, { value: 'ayah', label: 'Āyāt' }]} />
+      <Segmented light value={mode} onChange={setMode} options={[{ value: 'juz', label: 'Juz' }, { value: 'half', label: 'Half-juz' }, { value: 'surah', label: 'Surah' }, { value: 'page', label: 'Pages' }, { value: 'ayah', label: 'Āyāt' }]} />
       <motion.div key={mode} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.18 }}>
         {mode === 'juz' && <JuzMode {...props} />}
+        {mode === 'half' && <HalfJuzMode {...props} />}
         {mode === 'surah' && <SurahMode {...props} />}
         {mode === 'page' && <PageMode {...props} />}
         {mode === 'ayah' && <AyahMode {...props} />}
@@ -208,4 +223,3 @@ export default function MaterialPicker({ value, onChange, known = new Set() }) {
     </div>
   );
 }
-

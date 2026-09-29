@@ -69,7 +69,7 @@ test('sync', async t => {
     a.init();
     a.review('p604', { mistakes: [{ ayahId: '113:3', type: 'hesitation' }] });
     a.review('p603', { accuracy: 'perfect', fluency: 'automatic' });
-    a.repo.put('settings', 'app', { capacity: 90 });
+    a.repo.put('settings', 'app', { capacity: 90, strengthenQueue: ['h59', 'h58'], maintenanceHalfJuzIds: ['h60'] });
     assert.equal(a.repo.pendingCount(), 4, 'three events + settings pending');
     await a.login('aisha').then(() => assert.fail('should be offline'), e => assert.ok(e instanceof NetworkError));
     // Sign in happened earlier in real life; bind with a token issued while online.
@@ -82,6 +82,7 @@ test('sync', async t => {
     const reopened = a.restart();
     assert.equal(reopened.repo.pendingCount(), 4, 'pending flags persisted');
     assert.deepEqual(state(reopened), state(a), 'engine rebuilt identically from persisted events');
+    assert.deepEqual(reopened.repo.get('settings', 'app').strengthenQueue, ['h59', 'h58'], 'manual queue ordering survives a restart');
     assert.equal(await count(s, 'revision_events'), 0);
   });
 
@@ -112,6 +113,8 @@ test('sync', async t => {
     assert.deepEqual(state(b), state(a));
     assert.equal(plan(b, '2026-09-02'), plan(a, '2026-09-02'));
     assert.equal(b.repo.get('settings', 'app').capacity, 90);
+    assert.deepEqual(b.repo.get('settings', 'app').strengthenQueue, ['h59', 'h58']);
+    assert.deepEqual(b.repo.get('settings', 'app').maintenanceHalfJuzIds, ['h60']);
   });
 
   await t.test('repeated syncs never duplicate records', async () => {

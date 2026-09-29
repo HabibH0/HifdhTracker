@@ -1,6 +1,7 @@
 import { calendarDay } from '@engine/time.js';
-import { capacityToday, dayTasks, derived, nowIso, timeZone, today } from './store.js';
+import { capacityToday, dayTasks, derived, getState, nowIso, timeZone, today } from './store.js';
 import { halfLabel, hizbNum, juzNum, pageNum, pagesLabel, compressPages, rangeLabel, ayahLabel, pageOfAyah } from './quran.js';
+import { sessionPracticeItems } from './session-practice.js';
 
 const countPages = nums => `${nums.length} page${nums.length === 1 ? '' : 's'} · ${compressPages(nums)}`;
 
@@ -13,7 +14,8 @@ export const TASK_TYPES = {
   maintenance: { label: 'Maintenance', tone: 'gold', icon: 'leaf' },
 };
 
-const mins = n => Math.max(1, Math.round(n));
+// Preserve fractional estimates so rounding each task cannot make a 60-minute plan show 61.
+const mins = n => Math.max(0.1, Math.round(n * 10) / 10);
 // Calendar days, not 24-hour spans: something revised at 6am yesterday was "yesterday".
 function lastRevised(iso) {
   const diff = Math.round((Date.parse(today()) - Date.parse(calendarDay(iso, timeZone()))) / 86400000);
@@ -101,6 +103,21 @@ function targetedTask(engine, items) {
   };
 }
 
+export function sessionPracticeTask(engine, sessionId) {
+  const items = sessionPracticeItems(engine, sessionId);
+  if (!items.length) return null;
+  const task = targetedTask(engine, items);
+  task.key = `session-practice:${sessionId}`;
+  task.title = 'Practise session mistakes';
+  task.status = 'Recall each location with its surrounding āyāt';
+  task.sourceSessionId = sessionId;
+  task.targets = task.targets.map((target, i) => ({
+    ...target, mistakeCount: items[i].mistakeCount, mistakeTypes: items[i].mistakeTypes,
+    why: items[i].mistakeCount ? `${items[i].mistakeCount} mistake${items[i].mistakeCount === 1 ? '' : 's'} in this session` : 'Difficult or failed recall in this session',
+  }));
+  return task;
+}
+
 function maintenanceTask(engine, items) {
   // The planner spreads about one juz of maintenance across the least-recently maintained juz;
   // the reciter experiences it as one sitting.
@@ -111,7 +128,7 @@ function maintenanceTask(engine, items) {
   return {
     key: `maintenance:${items.map(i => i.juzId).join('+')}`, kind: 'maintenance',
     title: `Juz ${compressPages(juz)}`, subtitle: whole ? pagesLabel(nums) : countPages(nums),
-    status: oldest ? lastRevised(oldest) : 'Keeping strong material fresh',
+    status: items.every(i => i.firstReview) ? 'First maintenance review' : oldest ? lastRevised(oldest) : 'Keeping strong material fresh',
     minutes: mins(items.reduce((s, i) => s + i.estimatedMinutes, 0)), passes: 1, purpose: 'maintenance', activity: 'memory',
     fraction: items.reduce((s, i) => s + i.fractionOfJuz, 0),
     pages: pageInfo(engine, { pages: items.flatMap(i => i.passage.pages) }, items.flatMap(i => i.randomAccessTests ?? [])),
@@ -138,8 +155,9 @@ function dailyReviewTask(engine, items) {
 /** Today = completed tasks (logged) + the engine's current view of what remains. */
 export function todayPlan() {
   const capacity = capacityToday();
-  return derived(`today:${capacity}:${dayTasks().length}`, engine => {
-    const plan = engine.generateDailyPlan(nowIso(), capacity);
+  const preferences = getState().settings;
+  return derived(`today:${capacity}:${dayTasks().length}:${JSON.stringify([preferences.strengthenQueue, preferences.maintenanceHalfJuzIds])}`, engine => {
+    const plan = engine.generateDailyPlan(nowIso(), capacity, getState().settings);
     const done = dayTasks();
     const pending = [];
     for (const item of plan.strengthen) pending.push(strengthenTask(engine, item));
@@ -158,7 +176,7 @@ export function todayPlan() {
       label: d.kind === 'strengthening' ? `Strengthen ${halfLabel(hizbNum(d.halfJuzId))}` : d.kind === 'maintenance' ? `Maintenance · Juz ${juzNum(d.juzId)}` : d.kind === 'early_retention' ? `Retention check · ${halfLabel(hizbNum(d.halfJuzId))}` : d.ayahId ? `Targeted · ${ayahLabel(d.ayahId)}` : `Review · page ${d.pageIds?.map(pageNum).join(', ')}`,
     }));
     const nextStage = plan.deferredItems.find(d => d.reason === 'later_calendar_day_required');
-    const pendingMinutes = pending.reduce((s, t) => s + t.minutes, 0);
+    const pendingMinutes = Math.round(pending.reduce((s, t) => s + t.minutes, 0) * 10) / 10;
     return { date: plan.date, capacity, pending, done, deferred, nextStage, pendingMinutes, doneMinutes: done.reduce((s, t) => s + (t.actualMinutes ?? t.minutes), 0) };
   });
 }

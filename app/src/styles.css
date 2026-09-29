@@ -292,6 +292,7 @@ svg { display: block; }
 .center { display: flex; align-items: center; justify-content: center; }
 .row-flex { display: flex; align-items: center; gap: 10px; }
 .stack { display: flex; flex-direction: column; }
+.session-complete > * { flex-shrink: 0; }
 .gap-4 { gap: 4px; } .gap-8 { gap: 8px; } .gap-12 { gap: 12px; } .gap-16 { gap: 16px; }
 .grow { flex: 1; min-width: 0; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

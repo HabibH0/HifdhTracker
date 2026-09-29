@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useApp, getState, clearActiveSession } from '../lib/store.js';
 import { nav } from '../lib/nav.js';
-import { TASK_TYPES } from '../lib/plan.js';
+import { TASK_TYPES, sessionPracticeTask } from '../lib/plan.js';
+import { MistakeList } from './SessionMistakes.jsx';
 import { rangeLabel, ayahLabel } from '../lib/quran.js';
 import {
   ACCURACY, FLUENCY, MAX_TARGETED, addMistakes, begin, continueAfterRepair, elapsedMs, finishPass, mistakeLabel,
@@ -293,6 +294,7 @@ function TargetCard({ target, count, onClean, onAgain, extra, done, attempts }) 
         <div className="grow stack" style={{ gap: 2 }}>
           <div className="h3" style={{ fontSize: 16 }}>{target.label ?? (target.ayahId ? ayahLabel(target.ayahId) : `Page ${target.page} · whole page`)}</div>
           <div className="tiny">{target.why}{target.ayahId ? ` · page ${target.page}` : ''}</div>
+          {target.mistakeTypes?.length > 0 && <div className="tiny">{target.mistakeTypes.map(mistakeLabel).join(' · ')}</div>}
           {!done && target.ayahIds && target.ayahIds.length > 1 && <div className="tiny" style={{ color: 'var(--ink-2)' }}>Recite {rangeLabel(target.ayahIds)}</div>}
         </div>
         {attempts > 0 && <div className="row-flex" style={{ gap: 3 }}>{Array.from({ length: Math.min(attempts, 5) }, (_, i) => <span key={i} className="dot" style={{ width: 6, height: 6, background: 'var(--ink-3)' }} />)}</div>}
@@ -381,10 +383,12 @@ function Targeted({ s }) {
 
 function Complete({ s }) {
   const r = s.result;
+  const { engine } = useApp();
+  const practice = sessionPracticeTask(engine, s.sessionId);
   const done = () => { clearActiveSession(); nav.pop(); };
   return (
     <>
-      <div className="grow stack pad" style={{ alignItems: 'center', justifyContent: 'center', textAlign: 'center', gap: 10, paddingTop: 'var(--safe-t)' }}>
+      <div className="scroll stack pad session-complete" style={{ alignItems: 'center', textAlign: 'center', gap: 10, paddingTop: 'calc(var(--safe-t) + 24px)', paddingBottom: 20 }}>
         {r.passed ? <CheckBurst size={92} /> : (
           <motion.div initial={{ scale: 0.6, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={spring} style={{ width: 92, height: 92, borderRadius: 46, background: 'var(--amber-soft)', color: 'var(--amber-ink)', display: 'grid', placeItems: 'center' }}>
             <Icon name="refresh" size={40} />
@@ -405,8 +409,12 @@ function Complete({ s }) {
         {r.next && <motion.div className="row-flex small" style={{ marginTop: 8, gap: 8, textAlign: 'left', padding: '12px 14px', borderRadius: 14, background: 'var(--pri-soft)', color: 'var(--pri-soft-ink)', width: '100%' }} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.5 }}>
           <Icon name="arrowUp" size={18} style={{ transform: 'rotate(90deg)', flexShrink: 0 }} /><span>{r.next}</span>
         </motion.div>}
+        {practice && <><h2 className="h2" style={{ alignSelf: 'flex-start', marginTop: 14 }}>Your mistakes</h2><MistakeList task={practice} sessionId={s.sessionId} /></>}
       </div>
-      <div className="footer"><Button size="lg" block onClick={done}>Done</Button></div>
+      <div className="footer border">
+        {practice && <Button size="lg" block onClick={() => nav.replace('sessionMistakes', { sessionId: s.sessionId })}>Review & practise mistakes</Button>}
+        <Button variant={practice ? 'secondary' : 'primary'} size="lg" block onClick={done}>{practice ? 'Done for now' : 'Done'}</Button>
+      </div>
     </>
   );
 }

@@ -171,6 +171,7 @@ export default function MushafTab() {
         </Pressable>
       </div>
       <div style={{ margin: '18px 0 16px' }}>
+        <Button variant="secondary" block style={{ marginBottom: 12 }} onClick={() => nav.push('revisionSections')}>Manage revision</Button>
         <Segmented value={view} onChange={setView} options={[{ value: 'juz', label: 'Juz' }, { value: 'surah', label: 'Surah' }, { value: 'page', label: 'Pages' }]} />
       </div>
       <motion.div key={view} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}>

@@ -610,17 +610,20 @@ export class RevisionEngine {
     return clone([...links.values()]);
   }
 
-  selectNextStrengthening(date) {
+  selectNextStrengthening(date, { strengthenQueue = [], maintenanceHalfJuzIds = [] } = {}) {
     const at = this._at(date);
     if (this._activeCycle()) return null;
+    if (this.state.cycles.some(c => c.graduatedAt && calendarDay(c.graduatedAt, this.config.timeZone) === calendarDay(at, this.config.timeZone))) return null;
+    const requested = strengthenQueue.find(id => this.halfJuzIds.includes(id) && this._halfPages(id).length);
+    if (requested) return { halfJuzId: requested, pageIds: this._halfPages(requested), stage: 1, requiresStart: true };
     const queued = Object.values(this.state.repairRequests);
-    const candidates = this.halfJuzIds.map(id => this.getHalfJuzState(id, at)).filter(h => h.memorizedPageCount > 0 && (queued.some(q => q.halfJuzId === h.halfJuzId) || (!Object.values(this.state.retention).some(r => r.halfJuzId === h.halfJuzId && r.status === 'pending') && h.stabilityDays < this.config.strengthening.weakSelectionThreshold)));
+    const candidates = this.halfJuzIds.map(id => this.getHalfJuzState(id, at)).filter(h => h.memorizedPageCount > 0 && (queued.some(q => q.halfJuzId === h.halfJuzId) || (!maintenanceHalfJuzIds.includes(h.halfJuzId) && !Object.values(this.state.retention).some(r => r.halfJuzId === h.halfJuzId && r.status === 'pending') && h.stabilityDays < this.config.strengthening.weakSelectionThreshold)));
     candidates.sort((a, b) => a.stabilityDays - b.stabilityDays || a.lastActiveRecallAt.localeCompare(b.lastActiveRecallAt) || a.halfJuzId.localeCompare(b.halfJuzId));
     const chosen = candidates[0];
     return chosen ? { halfJuzId: chosen.halfJuzId, pageIds: this.state.repairRequests[chosen.halfJuzId]?.pageIds ?? this._halfPages(chosen.halfJuzId), stage: 1, requiresStart: true } : null;
   }
 
-  generateDailyPlan(date, capacity = 'normal') { return buildDailyPlan(this, this._at(date), capacity); }
+  generateDailyPlan(date, capacity = 'normal', preferences = {}) { return buildDailyPlan(this, this._at(date), capacity, preferences); }
   getRevisionHistory({ pageId, sessionId } = {}) {
     if (pageId) this._page(pageId);
     return clone(Object.values(this.state.sessions).filter(s => !sessionId || s.sessionId === sessionId).map(s => ({ ...s, reviews: s.reviews.filter(r => !pageId || r.pageId === pageId), mistakes: this.state.mistakes.filter(m => m.sessionId === s.sessionId && (!pageId || m.pageId === pageId)) })).filter(s => s.reviews.length));

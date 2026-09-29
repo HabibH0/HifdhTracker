@@ -11,6 +11,19 @@ npm run build && npm run preview
 
 ## Mistake logging and regression checks
 
+**Today → Manage revision** lets users add or reassign material to an ordered relearning queue
+or a maintenance list. Whole juz, half-juz, surah, page and ayah selections are available.
+The first queued section starts when no cycle is active; subsequent sections wait for graduation
+and a later day. Queue ordering and maintenance choices live in synced settings and backups.
+New maintenance material uses the existing `strong` onboarding estimate; existing evidence is
+preserved. Choosing maintenance allows preventive rotation before three spaced successes, but
+does not invent successes or bypass due reviews, retention checks or evidence of deterioration.
+
+Each completed session shows its own mistakes and offers **Review & practise mistakes**.
+Completed cards on Today and entries in History reopen the same review. Practice uses a new
+targeted session covering the mistake locations with memorized context; the original session,
+mistakes and strengthening outcome remain intact. Same-day stability limits still apply.
+
 During a revision, tap **Log mistake**, choose a page, and tap each affected word or āyah.
 Each tap adds a marked location; select its mistake type if known. Marks stay selected when
 switching pages. Tap a selection to edit it, or use its remove button, then **Save N mistakes**

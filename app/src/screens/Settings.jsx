@@ -100,6 +100,7 @@ export default function Settings() {
         </div>
         <Row icon="sparkle" label="Random-access testing" sub="Some reviews begin from a random āyah"><Toggle on={settings.randomAccess} onChange={v => setSettings({ randomAccess: v })} label="Random-access testing" /></Row>
         <Row icon="layers" label="Memorized material" value={`${inventory.totalTrackedPages} pages`} onClick={() => nav.push('memorized')} />
+        <Row icon="layers" label="Manage revision" sub="Relearning queue and maintenance sections" onClick={() => nav.push('revisionSections')} />
       </Section>
 
       <Section title="Mushaf">

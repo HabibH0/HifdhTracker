@@ -5,7 +5,7 @@ import { sessions, sessionKind, isSpacedSuccess } from '../lib/stats.js';
 import { TASK_TYPES } from '../lib/plan.js';
 import { ayahLabel, pageNum, pagesLabel } from '../lib/quran.js';
 import { mistakeLabel, ACCURACY, FLUENCY } from '../lib/session.js';
-import { Pressable, Tag, TopBar } from '../components/ui.jsx';
+import { Button, Pressable, Tag, TopBar } from '../components/ui.jsx';
 import { Icon } from '../components/Icons.jsx';
 
 const dayFmt = new Intl.DateTimeFormat('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
@@ -56,6 +56,7 @@ function sessionSheet(s, meta) {
           </div>
         ))}
       </div>
+      <Button variant="secondary" block onClick={() => { nav.closeSheet(); nav.push('sessionMistakes', { sessionId: s.sessionId }); }}>Review & practise mistakes</Button>
       <div style={{ height: 4 }} />
     </div>
   ));

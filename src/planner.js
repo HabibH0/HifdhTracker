@@ -26,7 +26,9 @@ function contextFor(engine, ayahId, known) {
   return { startAyahId: ayat[from].id, endAyahId: ayat[to].id, instruction: 'Recall the mistake location with its surrounding memorized ayat, staying within material you know, until one clean recall proves the transition.' };
 }
 
-export function buildDailyPlan(engine, at, capacity) {
+export function buildDailyPlan(engine, at, capacity, preferences = {}) {
+  const maintenanceHalves = new Set(preferences.maintenanceHalfJuzIds ?? []);
+  const queuedHalves = new Set(preferences.strengthenQueue ?? []);
   const config = engine.config, day = calendarDay(at, config.timeZone);
   const capacityMinutes = typeof capacity === 'string' ? config.capacityMinutes[capacity] : capacity;
   if (!Number.isFinite(capacityMinutes) || capacityMinutes < 0) throw new Error('Capacity must be a known preset or a nonnegative number of minutes');
@@ -66,7 +68,7 @@ export function buildDailyPlan(engine, at, capacity) {
 
   const cycle = engine._activeCycle();
   const allTroublesome = engine.getTroublesomeAyat(at);
-  const candidate = cycle ?? engine.selectNextStrengthening(at);
+  const candidate = cycle ?? engine.selectNextStrengthening(at, preferences);
   const strengthenItem = candidate && (() => {
     const troublesome = allTroublesome.filter(a => a.pageIds.some(id => candidate.pageIds.includes(id)));
     const targetedPageIds = candidate.pageIds.filter(id => engine._page(id).targetedRepair || engine._page(id).stabilityDays < config.states.weakBelow);
@@ -113,21 +115,30 @@ export function buildDailyPlan(engine, at, capacity) {
 
   const maintenance = engine.juzIds.map(juzId => {
     const all = engine.metadata.pages.filter(p => p.juzId === juzId);
-    const pageIds = all.filter(p => strong(engine._pageState(engine._page(p.id))) && !allDue.has(p.id) && !selected.has(p.id) && !completed.has(p.id) && !engine._page(p.id).targetedRepair).map(p => p.id);
+    const pageIds = all.filter(p => engine._page(p.id).memorizedAyahIds.length && (strong(engine._pageState(engine._page(p.id))) || maintenanceHalves.has(p.halfJuzId)) && !queuedHalves.has(p.halfJuzId) && !engine._cycleForPage(p.id) && !engine._retentionForPage(p.id) && !allDue.has(p.id) && !selected.has(p.id) && !completed.has(p.id) && !engine._page(p.id).targetedRepair).map(p => p.id);
+    pageIds.sort((a, b) => (engine._page(a).lastRevisedAt ?? '').localeCompare(engine._page(b).lastRevisedAt ?? '') || engine.getForgettingRisk(b, at).riskRatio - engine.getForgettingRisk(a, at).riskRatio || a.localeCompare(b));
     const lastMaintenanceAt = engine.state.maintenance[juzId] ?? engine.state.initializedAt;
-    const lastRevisedAt = pageIds.map(id => engine._page(id).lastRevisedAt ?? engine.state.initializedAt).sort()[0] ?? at;
+    const lastRevisedAt = pageIds.map(id => engine._page(id).lastRevisedAt ?? engine._page(id).enrolledAt).sort()[0] ?? at;
     const risk = pageIds.map(id => engine.getForgettingRisk(id, at)).sort((a, b) => b.riskRatio - a.riskRatio)[0];
-    return { juzId, pageIds, fractionOfJuz: pageIds.reduce((sum, id) => sum + engine._pageFraction(id), 0) / all.length, lastMaintenanceAt, lastRevisedAt, risk };
+    return { juzId, pageIds, fractionOfJuz: pageIds.reduce((sum, id) => sum + engine._pageFraction(id), 0) / all.length, lastMaintenanceAt, lastRevisedAt, firstReview: pageIds.every(id => !engine._page(id).lastActiveRecallAt), risk };
   }).filter(j => j.pageIds.length).sort((a, b) => a.lastMaintenanceAt.localeCompare(b.lastMaintenanceAt) || a.lastRevisedAt.localeCompare(b.lastRevisedAt) || b.risk.riskRatio - a.risk.riskRatio || a.juzId.localeCompare(b.juzId));
   let maintained = 0;
   for (const item of maintenance) {
-    if (maintained >= config.maintenance.targetJuzPerDay) break;
+    if (maintained + 1e-9 >= config.maintenance.targetJuzPerDay) break;
     const juzPageCount = engine.metadata.pages.filter(p => p.juzId === item.juzId).length;
-    const pageIds = []; let selectedFraction = 0;
+    const pageIds = []; let selectedFraction = 0, selectedMinutes = 0;
+    const availableMinutes = plan.remainingCapacityMinutes - plan.totalEstimatedDurationMinutes;
     for (const id of item.pageIds) {
       const fraction = engine._pageFraction(id) / juzPageCount;
       if (maintained + selectedFraction + fraction > config.maintenance.targetJuzPerDay + 1e-9) break;
+      const minutes = engine._pageMinutes(id) + activityFor(engine, [id], day, at).randomAccessTests.length * config.durations.randomStartExtraMinutes;
+      if (maintenanceHalves.size && selectedMinutes + minutes > availableMinutes + 1e-9) continue;
       pageIds.push(id); selectedFraction += fraction;
+      selectedMinutes += minutes;
+    }
+    if (!pageIds.length && availableMinutes < Math.min(...item.pageIds.map(id => engine._pageMinutes(id)))) {
+      add('maintenance', { ...item, kind: 'maintenance', estimatedMinutes: item.pageIds.reduce((sum, id) => sum + engine._pageMinutes(id), 0) });
+      continue;
     }
     if (!pageIds.length) continue;
     const prescription = activityFor(engine, pageIds, day, at);

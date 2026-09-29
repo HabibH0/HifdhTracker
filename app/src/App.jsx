@@ -15,6 +15,8 @@ import MistakeLogger from './screens/MistakeLogger.jsx';
 import Reader from './screens/Reader.jsx';
 import WeakPoints from './screens/WeakPoints.jsx';
 import Memorized from './screens/Memorized.jsx';
+import RevisionSections from './screens/RevisionSections.jsx';
+import SessionMistakes from './screens/SessionMistakes.jsx';
 import History from './screens/History.jsx';
 import Account from './screens/Account.jsx';
 import { startSync, syncNow } from './lib/cloud.js';
@@ -29,7 +31,7 @@ const TABS = [
   { id: 'progress', label: 'Progress', icon: 'chart', C: Progress },
   { id: 'settings', label: 'Settings', icon: 'gear', C: Settings },
 ];
-const ROUTES = { session: Session, logMistake: MistakeLogger, reader: Reader, weakPoints: WeakPoints, memorized: Memorized, history: History, account: Account };
+const ROUTES = { session: Session, sessionMistakes: SessionMistakes, logMistake: MistakeLogger, reader: Reader, weakPoints: WeakPoints, memorized: Memorized, revisionSections: RevisionSections, history: History, account: Account };
 
 const variants = {
   push: { initial: { x: '100%' }, animate: { x: 0 }, exit: { x: '100%' }, covered: { x: '-22%' } },
@@ -55,8 +57,8 @@ function Shell() {
   const { tab, visited, stack } = useNav();
   const topMode = stack.at(-1)?.mode;
   useReminder();
-  const { version } = useApp();
-  useEffect(() => { startQueuedIfReady(); }, [version]);
+  const { version, settings } = useApp();
+  useEffect(() => { startQueuedIfReady(); }, [version, settings.strengthenQueue]);
   return (
     <>
       <motion.div className="layer" style={{ zIndex: 1 }} animate={stack.length && topMode === 'push' ? { x: '-22%' } : stack.length && topMode === 'modal' ? { scale: 0.96 } : { x: 0, scale: 1 }} transition={spring}>
