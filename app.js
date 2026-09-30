@@ -55,7 +55,7 @@ const I = {
 let state = load();
 let ui = {
   tab: 'today', queueTab: 'weak', hifdhView: 'map', selecting: false, selected: new Set(),
-  logSel: new Set(), barSel: null, theme: 'system', justDone: null,
+  logSel: new Set(), logDate: null, logEarlier: false, barSel: null, chartRange: 14, theme: 'system', justDone: null,
 };
 try {
   ui.tab = localStorage.getItem(STORAGE_KEY + '.tab') || 'today';
@@ -79,6 +79,7 @@ function freshState() {
     settings: { ...DEFAULT_SETTINGS }, sections, weakQueue: [], plan: null,
     log: [],                                  // every recitation: { d: 'YYYY-MM-DD', s: sectionId, k: 'plan' | 'extra' }
     counters: { cycles: 0, promotions: 0 },
+    journeys: [],                             // weak → confident: { s, from, to } dates
   };
 }
 
@@ -86,7 +87,14 @@ function freshState() {
 function upgrade(s) {
   s.settings = { ...DEFAULT_SETTINGS, ...s.settings };
   s.counters = { cycles: 0, promotions: 0, ...s.counters };
-  for (const sec of Object.values(s.sections)) if (typeof sec.tie !== 'number') sec.tie = Math.random();
+  if (!Array.isArray(s.journeys)) s.journeys = [];
+  for (const sec of Object.values(s.sections)) {
+    if (typeof sec.tie !== 'number') sec.tie = Math.random();
+    // Sections already weak before journeys were tracked: start from when they entered the queue.
+    if (sec.memorised && sec.strength === 'weak' && !sec.weakSince) {
+      sec.weakSince = sec.enteredAt > 1e12 ? iso(new Date(sec.enteredAt)) : iso(new Date());
+    }
+  }
   if (!Array.isArray(s.log)) {
     // No history yet: seed one entry per section from its last revision so stats start sensibly.
     s.log = Object.values(s.sections)
@@ -123,6 +131,13 @@ function relDay(s) {
   if (n === 1) return 'Tomorrow';
   if (n === -1) return 'Yesterday';
   if (n > 1 && n < 7) return parse(s).toLocaleDateString('en-GB', { weekday: 'long' });
+  return parse(s).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+}
+/** "Today", "Yesterday" or "28 Sept" — for past dates. */
+function dayLabel(s) {
+  const n = diffDays(s, today());
+  if (n === 0) return 'Today';
+  if (n === 1) return 'Yesterday';
   return parse(s).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
 function agoDay(s) {
@@ -184,8 +199,13 @@ function classify(id, patch) {
     s.enteredAt = Date.now();
     s.tie = Math.random();
     if (after === 'conf') s.confRevs = 0;
-    if (after === 'weak') { s.cycleDone = 0; s.extraDays = 0; }
+    if (after === 'weak') { s.cycleDone = 0; s.extraDays = 0; s.weakSince ||= today(); }
     if (before === 'conf' && after === 'maint') state.counters.promotions++;
+    if (after === 'maint' && s.weakSince) {
+      state.journeys.push({ s: s.id, from: s.weakSince, to: today() });
+      delete s.weakSince;
+    }
+    if (after === 'none') delete s.weakSince;
   }
   normalize();
 }
@@ -252,12 +272,14 @@ function queuePosition(s) {
 
 /* ---------- Recording revisions ---------- */
 
-/** Mark a section revised today and log it. Doesn't commit. */
-function recordRevision(s, kind) {
-  s.lastRevised = today();
+/** Record a revision of a section on a date (default today) and log it. Doesn't commit. */
+function recordRevision(s, kind, date = today()) {
+  if (!s.lastRevised || date >= s.lastRevised) { s.lastRevised = date; s.tie = Math.random(); }
   s.revisionCount++;
-  s.tie = Math.random();
-  state.log.push({ d: today(), s: s.id, k: kind });
+  // Keep the log in date order (back-dated entries slot in after that day's others).
+  let i = state.log.length;
+  while (i > 0 && state.log[i - 1].d > date) i--;
+  state.log.splice(i, 0, { d: date, s: s.id, k: kind });
 }
 
 /**
@@ -312,16 +334,16 @@ function undoItem(sid) {
  * today's plan is simply ticked off; anything else counts as an extra revision, which moves it
  * to the back of its rotation and counts towards confidence building.
  */
-function logRecitations(ids) {
+function logRecitations(ids, date = today()) {
   const snapshot = JSON.stringify(state);
   let prompt = null, promptSid = null;
   for (const sid of ids) {
     const it = planItem(sid);
     let p = null;
-    if (it && !it.done) p = applyCompletion(sid);
+    if (date === today() && it && !it.done) p = applyCompletion(sid);
     else {
       const s = state.sections[sid];
-      recordRevision(s, 'extra');
+      recordRevision(s, 'extra', date);
       if (cat(s) === 'conf') {
         s.confRevs++;
         if (s.confRevs === state.settings.promoteAfter) p = 'promote';
@@ -332,8 +354,9 @@ function logRecitations(ids) {
   commit();
   haptic();
   const pagesTotal = ids.reduce((n, id) => n + pageCount(id), 0);
+  const when = date === today() ? '' : ` · ${dayLabel(date).toLowerCase()}`;
   if (prompt) showPrompt(prompt, promptSid);
-  else toast(`Logged ${ids.length === 1 ? title(ids[0]) : `${ids.length} half-juz`} · ${pagesTotal} pages`, () => {
+  else toast(`Logged ${ids.length === 1 ? title(ids[0]) : `${ids.length} half-juz`} · ${pagesTotal} pages${when}`, () => {
     state = upgrade(JSON.parse(snapshot));
     commit();
   });
@@ -481,6 +504,12 @@ function loadSample() {
   state.weakQueue = [10, 5, 6, 53];
   const cur = state.sections[10];
   cur.cycleDone = 1; cur.lastRevised = addDays(t, -1); cur.revisionCount = 1;
+  state.journeys = [
+    { s: 8, from: addDays(t, -44), to: addDays(t, -27) },
+    { s: 54, from: addDays(t, -33), to: addDays(t, -19) },
+    { s: 1, from: addDays(t, -21), to: addDays(t, -10) },
+  ];
+  [10, 5, 6, 53].forEach((id, k) => { state.sections[id].weakSince = addDays(t, -2 - k * 3); });
   // A month of recitation history (with a couple of missed days) so the stats have something to show.
   const ids = sections().filter(s => s.memorised).map(s => s.id);
   for (let back = 29; back >= 1; back--) {
@@ -857,18 +886,23 @@ function renderMap() {
 }
 
 /* ---------- Stats ---------- */
+const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const weekdayOf = d => (parse(d).getDay() + 6) % 7;      // Monday = 0
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+/** Sequential ramp step (0–4) for a value against the max: one hue, light → strong. */
+const heatStep = (v, max) => (!v ? 0 : Math.min(4, Math.ceil((v / Math.max(1, max)) * 4)));
+
 function renderStats() {
   const st = computeStats();
   const f = greenForecast();
   const tile = (k, v, sub, key) => `<div class="tile"><div class="k">${k}</div><div class="v" ${anim(key, 'bump', v)}>${v}</div><div class="sub">${sub}</div></div>`;
-  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
   const sectionRow = (s, meta) => `
     <div class="item"><span class="dot ${cat(s)}"></span>
       <button class="item-main" data-action="open" data-sid="${s.id}"><div class="t">${title(s.id)}</div><div class="s">${juzName(s.id)}</div></button>
       <span class="meta">${meta}</span></div>`;
   const kv = (k, v) => `<div class="item"><span class="k">${k}</span><span class="v">${v}</span></div>`;
   const kPct = st.khatmProgress / 60 * 100;
-
   const green = f.never ? 'Confidence building is off'
     : !f.days ? (f.ready ? `${plural(f.ready, 'section')} ready to confirm` : 'Everything is green')
     : `${plural(f.days, 'day')} · by ${parse(f.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}`;
@@ -886,12 +920,26 @@ function renderStats() {
     <section class="block qa"><div class="tiles">
       ${tile('Current streak', plural(st.current, 'day'), st.current ? 'in a row' : 'recite today to start', 'st-cur')}
       ${tile('Best streak', plural(st.best, 'day'), 'longest run', 'st-best')}
-      ${tile('Pages revised', st.totalPages.toLocaleString('en-GB'), `${plural(st.recitations, 'recitation')}`, 'st-pages')}
+      ${tile('Pages revised', st.totalPages.toLocaleString('en-GB'), plural(st.recitations, 'recitation'), 'st-pages')}
       ${tile('Daily average', `${Math.round(st.avg30)} pp`, 'last 30 days', 'st-avg')}
     </div></section>
 
-    <section class="block qa"><div class="group-title">Pages per day</div>
-      <div class="card chart-card">${pagesChart(st.pagesByDay, 14)}</div></section>
+    <section class="block qa"><div class="label-row"><div class="group-title">Pages revised</div>
+      ${segWrap('seg-range', ['14', '30', 'all'].indexOf(String(ui.chartRange)), 3,
+        [['14', '14D'], ['30', '30D'], ['all', 'All']].map(([v, l]) =>
+          `<button class="${String(ui.chartRange) === v ? 'on' : ''}" data-action="chart-range" data-v="${v}">${l}</button>`).join(''), 'mini')}</div>
+      <div class="card chart-card">${pagesChart(st.pagesByDay, ui.chartRange)}</div></section>
+
+    <section class="block qa"><div class="group-title">Calendar</div>
+      <div class="card chart-card">${calendarHeat(st.pagesByDay)}</div></section>
+
+    <section class="block qa"><div class="group-title">Busiest weekday</div>
+      <div class="card chart-card">${weekdayBars(st.pagesByDay)}</div></section>
+
+    <section class="block qa"><div class="group-title">Revisions per section · last 30 days</div>
+      <div class="card chart-card">${frequencyMap()}</div></section>
+
+    <section class="block qa"><div class="group-title">Weak to confident</div>${journeys()}</section>
 
     <section class="block qa"><div class="group-title">Path to green</div>
       <div class="card list kv">
@@ -916,52 +964,196 @@ function renderStats() {
       </div></section>`;
 }
 
-/** Bar chart of pages revised per day. Tap a bar to read its value. */
-function pagesChart(pagesByDay, days) {
+/** A readout line that tapping a chart mark updates in place (see the `peek` action). */
+const readout = (id, main, right = '') =>
+  `<div class="readout"><span id="${id}">${main}</span><span class="muted">${right}</span></div>`;
+
+/**
+ * Bar chart of pages revised: the last 14 or 30 days, or all time (weekly totals once the
+ * history is longer than 60 days). Tap a bar to read its value.
+ */
+function pagesChart(pagesByDay, range) {
   const t = today();
-  const data = Array.from({ length: days }, (_, i) => {
-    const d = addDays(t, i - days + 1);
-    return { d, v: pagesByDay.get(d) || 0 };
-  });
-  const sel = ui.barSel == null ? days - 1 : Math.min(ui.barSel, days - 1);
-  const avg = data.reduce((a, x) => a + x.v, 0) / days;
+  let data, unit = 'pages';
+  if (range === 'all') {
+    const first = [...pagesByDay.keys()].sort()[0] || t;
+    const span = diffDays(first, t) + 1;
+    if (span > 60) {
+      unit = 'pages that week';
+      const start = addDays(first, -weekdayOf(first));                  // Monday of the first week
+      const weeks = Math.ceil((diffDays(start, t) + 1) / 7);
+      data = Array.from({ length: weeks }, (_, w) => {
+        const from = addDays(start, w * 7);
+        let v = 0;
+        for (let k = 0; k < 7; k++) v += pagesByDay.get(addDays(from, k)) || 0;
+        return { label: `w/c ${parse(from).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}`, v };
+      });
+    } else {
+      data = Array.from({ length: Math.max(span, 7) }, (_, i) => {
+        const d = addDays(t, i - Math.max(span, 7) + 1);
+        return { label: dayLabel(d), v: pagesByDay.get(d) || 0 };
+      });
+    }
+  } else {
+    data = Array.from({ length: range }, (_, i) => {
+      const d = addDays(t, i - range + 1);
+      return { label: dayLabel(d), v: pagesByDay.get(d) || 0 };
+    });
+  }
+  const n = data.length;
+  const sel = ui.barSel == null || ui.barSel >= n ? n - 1 : ui.barSel;
+  const avg = data.reduce((a, x) => a + x.v, 0) / n;
   const top = Math.max(10, Math.ceil(Math.max(...data.map(x => x.v)) / 10) * 10);
   const W = 320, H = 150, L = 26, R = 2, T = 8, B = 22;
-  const pw = W - L - R, ph = H - T - B, slot = pw / days, bw = slot - 4;
+  const pw = W - L - R, ph = H - T - B, slot = pw / n;
+  const gap = Math.min(4, slot * 0.3), bw = Math.max(1, slot - gap);
   const y = v => T + ph - (v / top) * ph;
   const barPath = (x, yTop, w, h) => {
     const r = Math.min(4, w / 2, h);
     return `M${x},${yTop + h}V${yTop + r}Q${x},${yTop} ${x + r},${yTop}H${x + w - r}Q${x + w},${yTop} ${x + w},${yTop + r}V${yTop + h}Z`;
   };
-  const label = d => d === t ? 'Today' : parse(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
-
   const grid = [0, top / 2, top].map(v => `
     <line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" class="grid-line"/>
     <text x="${L - 6}" y="${y(v) + 3.5}" class="axis" text-anchor="end">${v}</text>`).join('');
   const bars = data.map((x, i) => {
-    const bx = L + i * slot + 2;
-    const h = (x.v / top) * ph;
-    const mark = x.v ? `<path d="${barPath(bx, y(x.v), bw, h)}" class="bar-mark ${i === sel ? 'sel' : ''}" data-i="${i}" style="--b:${i}"/>`
+    const bx = L + i * slot + gap / 2;
+    const mark = x.v ? `<path d="${barPath(bx, y(x.v), bw, (x.v / top) * ph)}" class="bar-mark ${i === sel ? 'sel' : ''}" data-i="${i}" style="--b:${Math.min(i, 30)}"/>`
       : `<rect x="${bx}" y="${T + ph - 2}" width="${bw}" height="2" rx="1" class="bar-zero"/>`;
-    return `${mark}<rect x="${L + i * slot}" y="${T}" width="${slot}" height="${ph + B}" class="bar-hit" data-action="bar" data-i="${i}"
-      data-label="${label(x.d)}" data-v="${x.v}"><title>${label(x.d)}: ${x.v} pages</title></rect>`;
+    const text = `<b>${x.v} ${unit}</b> · ${x.label}`;
+    return `${mark}<rect x="${L + i * slot}" y="${T}" width="${slot}" height="${ph + B}" class="bar-hit" data-action="peek"
+      data-target="bar-readout" data-group="bar-mark" data-i="${i}" data-text="${esc(text)}"><title>${x.label}: ${x.v} ${unit}</title></rect>`;
   }).join('');
-  const xl = [0, Math.floor(days / 2), days - 1].map(i =>
-    `<text x="${L + i * slot + slot / 2}" y="${H - 6}" class="axis" text-anchor="${i === 0 ? 'start' : i === days - 1 ? 'end' : 'middle'}">${label(data[i].d)}</text>`).join('');
-
-  return `
-    <div class="readout"><span id="bar-readout"><b>${data[sel].v} pages</b> · ${label(data[sel].d)}</span>
-      <span class="muted">avg ${Math.round(avg)}/day</span></div>
-    <svg viewBox="0 0 ${W} ${H}" class="chart" role="img" aria-label="Pages revised per day over the last ${days} days, averaging ${Math.round(avg)} pages a day">
+  const ticks = n > 2 ? [0, Math.floor(n / 2), n - 1] : [n - 1];
+  const xl = ticks.map(i =>
+    `<text x="${L + i * slot + slot / 2}" y="${H - 6}" class="axis" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${data[i].label.replace('w/c ', '')}</text>`).join('');
+  return readout('bar-readout', `<b>${data[sel].v} ${unit}</b> · ${data[sel].label}`, `avg ${Math.round(avg)}${unit === 'pages' ? '/day' : '/week'}`) + `
+    <svg viewBox="0 0 ${W} ${H}" class="chart" role="img" aria-label="Pages revised, averaging ${Math.round(avg)} ${unit === 'pages' ? 'a day' : 'a week'}">
       ${grid}${bars}${xl}
     </svg>`;
+}
+
+/** GitHub-style calendar: the last 18 weeks, one square per day, shaded by pages. */
+function calendarHeat(pagesByDay) {
+  const t = today();
+  const weeks = 18;
+  const start = addDays(t, -weekdayOf(t) - (weeks - 1) * 7);
+  const days = Array.from({ length: weeks * 7 }, (_, i) => addDays(start, i));
+  const max = Math.max(...days.map(d => pagesByDay.get(d) || 0));
+  const cell = 14, gap = 3, L = 28, T = 16;
+  const W = L + weeks * (cell + gap), H = T + 7 * (cell + gap);
+  let months = '', lastMonth = -1;
+  const squares = days.map((d, i) => {
+    const w = Math.floor(i / 7), wd = i % 7;
+    const x = L + w * (cell + gap), yy = T + wd * (cell + gap);
+    const m = parse(d).getMonth();
+    if (wd === 0 && m !== lastMonth) {
+      lastMonth = m;
+      if (w < weeks - 1) months += `<text x="${x}" y="10" class="axis">${parse(d).toLocaleDateString('en-GB', { month: 'short' })}</text>`;
+    }
+    if (d > t) return '';
+    const v = pagesByDay.get(d) || 0;
+    const text = `<b>${v} pages</b> · ${parse(d).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}`;
+    return `<rect x="${x}" y="${yy}" width="${cell}" height="${cell}" rx="3" class="heat h${heatStep(v, max)} ${d === t ? 'sel' : ''}"
+      data-action="peek" data-target="cal-readout" data-group="heat" data-text="${esc(text)}"><title>${d}: ${v} pages</title></rect>`;
+  }).join('');
+  const dayLabels = [['Mon', 0], ['Wed', 2], ['Fri', 4]].map(([l, r]) =>
+    `<text x="0" y="${T + r * (cell + gap) + 11}" class="axis">${l}</text>`).join('');
+  const active = days.filter(d => d <= t && pagesByDay.get(d)).length;
+  const legend = [0, 1, 2, 3, 4].map(k => `<i class="heat-key h${k}"></i>`).join('');
+  return readout('cal-readout', `<b>${pagesByDay.get(t) || 0} pages</b> · Today`, `${active} active days`) + `
+    <svg viewBox="0 0 ${W} ${H}" class="chart" role="img" aria-label="Calendar of pages revised per day over the last ${weeks} weeks; ${active} days with revision">
+      ${months}${dayLabels}${squares}
+    </svg>
+    <div class="heat-legend"><span>Less</span>${legend}<span>More</span></div>`;
+}
+
+/** Average pages on each weekday, over the weeks since the first recitation. */
+function weekdayBars(pagesByDay) {
+  const t = today();
+  const first = [...pagesByDay.keys()].sort()[0];
+  if (!first) return `<p class="skip" style="margin:4px">Appears once you've logged some revision.</p>`;
+  const totals = Array(7).fill(0), counts = Array(7).fill(0);
+  for (let d = first; d <= t; d = addDays(d, 1)) {
+    const wd = weekdayOf(d);
+    counts[wd]++;
+    totals[wd] += pagesByDay.get(d) || 0;
+  }
+  const avgs = totals.map((v, i) => (counts[i] ? v / counts[i] : 0));
+  const max = Math.max(...avgs);
+  const best = avgs.indexOf(max);
+  const rows = avgs.map((v, i) => `
+    <div class="wd-row ${i === best && max ? 'best' : ''}">
+      <span class="wd-name">${WEEKDAYS[i].slice(0, 3)}</span>
+      <span class="wd-track"><i ${anim(`wd-${i}`, 'w', max ? (v / max) * 100 : 0)}></i></span>
+      <span class="wd-val">${Math.round(v)}</span>
+    </div>`).join('');
+  return readout('wd-readout', max ? `<b>${WEEKDAYS[best]}</b> · ${Math.round(max)} pages on average` : 'No revision yet', 'avg pages') + rows;
+}
+
+/** Every memorised half-juz, shaded by how often it was recited in the last 30 days. */
+function frequencyMap() {
+  const t = today();
+  const from = addDays(t, -29);
+  const counts = new Map();
+  for (const e of state.log) if (e.d >= from) counts.set(e.s, (counts.get(e.s) || 0) + 1);
+  const mem = sections().filter(s => s.memorised);
+  if (!mem.length) return `<p class="skip" style="margin:4px">Appears once you've marked your memorised sections.</p>`;
+  const max = Math.max(1, ...mem.map(s => counts.get(s.id) || 0));
+  const least = [...mem].sort((a, b) => (counts.get(a.id) || 0) - (counts.get(b.id) || 0) || a.id - b.id)[0];
+  let grid = '';
+  for (let j = 1; j <= 30; j++) {
+    const a = state.sections[j * 2 - 1], b = state.sections[j * 2];
+    if (!a.memorised && !b.memorised) continue;
+    const half = s => {
+      if (!s.memorised) return `<span class="fq fq-none"></span>`;
+      const n = counts.get(s.id) || 0;
+      const text = `<b>${title(s.id)}</b> · ${plural(n, 'time')} in 30 days`;
+      return `<button class="fq h${heatStep(n, max)}" data-action="peek" data-target="fq-readout" data-group="fq" data-text="${esc(text)}"
+        aria-label="${title(s.id)}: ${plural(n, 'time')}">${n}</button>`;
+    };
+    grid += `<div class="juz"><div class="jn">${j}</div><div class="halves">${half(a)}${half(b)}</div></div>`;
+  }
+  const n = counts.get(least.id) || 0;
+  return readout('fq-readout', `Least revised: <b>${title(least.id)}</b> · ${plural(n, 'time')}`) +
+    `<div class="grid fq-grid">${grid}</div>
+    <div class="heat-legend"><span>Less</span>${[0, 1, 2, 3, 4].map(k => `<i class="heat-key h${k}"></i>`).join('')}<span>More</span></div>`;
+}
+
+/** How long sections took from being marked weak to being confident. */
+function journeys() {
+  const done = state.journeys.map(j => ({ ...j, days: Math.max(1, diffDays(j.from, j.to)) }));
+  const t = today();
+  const inProgress = sections().filter(s => s.memorised && s.weakSince && cat(s) !== 'maint')
+    .map(s => ({ s, days: Math.max(0, diffDays(s.weakSince, t)) })).sort((a, b) => b.days - a.days);
+  const kv = (k, v) => `<div class="item"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+  if (!done.length && !inProgress.length) {
+    return `<p class="skip">Appears once a section goes from weak to confident.</p>`;
+  }
+  const avg = done.length ? Math.round(done.reduce((a, j) => a + j.days, 0) / done.length) : null;
+  const fastest = done.length ? done.reduce((a, j) => (j.days < a.days ? j : a)) : null;
+  const recent = done.slice(-4).reverse().map(j => `
+    <div class="item"><span class="dot maint"></span>
+      <button class="item-main" data-action="open" data-sid="${j.s}"><div class="t">${title(j.s)}</div>
+        <div class="s">${parse(j.from).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} → ${parse(j.to).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</div></button>
+      <span class="meta">${plural(j.days, 'day')}</span></div>`).join('');
+  return `
+    <div class="card list kv">
+      ${kv('Average', avg == null ? '—' : plural(avg, 'day'))}
+      ${kv('Fastest', fastest ? `${plural(fastest.days, 'day')} · ${title(fastest.s)}` : '—')}
+      ${kv('Made confident', plural(done.length, 'section'))}
+      ${kv('In progress', inProgress.length ? `${inProgress.length} · longest ${plural(inProgress[0].days, 'day')}` : 'none')}
+    </div>
+    ${recent ? `<div class="card list" style="margin-top:10px">${recent}</div>` : ''}`;
 }
 
 /* ---------- Log a recitation ---------- */
 function openLog(refresh = false) {
   sheetSid = null;
   const sel = ui.logSel;
-  const doneToday = new Set(state.log.filter(e => e.d === today()).map(e => e.s));
+  const t = today();
+  const date = ui.logDate || t;
+  const mode = date === t ? 0 : date === addDays(t, -1) && !ui.logEarlier ? 1 : 2;
+  const doneToday = new Set(state.log.filter(e => e.d === date).map(e => e.s));
   const pagesSel = [...sel].reduce((n, id) => n + pageCount(id), 0);
   let grid = '';
   for (let j = 1; j <= 30; j++) {
@@ -974,11 +1166,17 @@ function openLog(refresh = false) {
   }
   openSheet(`
     <div class="sh-head"><h2>Log a recitation</h2>
-      <p>Pick the half-juz you recited today, scheduled or not. It counts towards your stats and moves the section to the back of its queue.</p></div>
+      <p>Pick the half-juz you recited, scheduled or not. It counts towards your stats and moves the section to the back of its queue.</p></div>
+    <div class="field">Recited on</div>
+    ${segWrap('seg-logdate', mode, 3,
+      `<button class="${mode === 0 ? 'on' : ''}" data-action="log-date" data-v="today">Today</button>` +
+      `<button class="${mode === 1 ? 'on' : ''}" data-action="log-date" data-v="yesterday">Yesterday</button>` +
+      `<button class="${mode === 2 ? 'on' : ''}" data-action="log-date" data-v="earlier">Earlier</button>`)}
+    ${mode === 2 ? `<input class="input date-input" type="date" id="log-date-input" value="${date}" max="${addDays(t, -1)}" min="${addDays(t, -365)}">` : ''}
     <div class="grid log-grid">${grid}</div>
-    ${doneToday.size ? '<p class="fine log-key"><span class="rt-key"></span>Already recited today</p>' : '<div style="height:6px"></div>'}
+    ${doneToday.size ? `<p class="fine log-key"><span class="rt-key"></span>Already recited ${date === t ? 'today' : `on ${dayLabel(date).toLowerCase() === 'yesterday' ? 'yesterday' : dayLabel(date)}`}</p>` : '<div style="height:6px"></div>'}
     <button class="btn" data-action="log-save" ${sel.size ? '' : 'disabled'}>
-      ${sel.size ? `Log ${sel.size} half-juz · ${pagesSel} pages` : 'Select what you recited'}</button>`, refresh);
+      ${sel.size ? `Log ${sel.size} half-juz · ${pagesSel} pages${date === t ? '' : ` · ${dayLabel(date)}`}` : 'Select what you recited'}</button>`, refresh);
 }
 
 function openEtaInfo() {
@@ -1541,22 +1739,41 @@ const actions = {
     ui.barSel = null;
     render({ sub: true });
   },
-  bar: d => {
-    ui.barSel = +d.i;
-    document.querySelectorAll('.bar-mark').forEach(m => m.classList.toggle('sel', m.dataset.i === d.i));
-    const hit = document.querySelector(`.bar-hit[data-i="${d.i}"]`);
-    const out = document.getElementById('bar-readout');
-    if (hit && out) out.innerHTML = `<b>${hit.dataset.v} pages</b> · ${hit.dataset.label}`;
+  // Tap a chart mark: highlight it and show its value in the chart's readout line.
+  peek: (d, el) => {
+    if (d.group === 'bar-mark') {
+      ui.barSel = +d.i;
+      document.querySelectorAll('.bar-mark').forEach(m => m.classList.toggle('sel', m.dataset.i === d.i));
+    } else {
+      document.querySelectorAll(`.${d.group}`).forEach(m => m.classList.toggle('sel', m === el));
+    }
+    const out = document.getElementById(d.target);
+    if (out) out.innerHTML = d.text;
+  },
+  'chart-range': d => {
+    const v = d.v === 'all' ? 'all' : +d.v;
+    if (ui.chartRange === v) return;
+    ui.chartRange = v;
+    ui.barSel = null;
+    render();
   },
   'eta-info': () => openEtaInfo(),
-  'log-open': () => { ui.logSel = new Set(); openLog(); },
+  'log-open': () => { ui.logSel = new Set(); ui.logDate = null; ui.logEarlier = false; openLog(); },
+  'log-date': d => {
+    const t = today();
+    ui.logEarlier = d.v === 'earlier';
+    ui.logDate = d.v === 'today' ? t : d.v === 'yesterday' ? addDays(t, -1)
+      : (ui.logDate && ui.logDate < addDays(t, -1) ? ui.logDate : addDays(t, -2));
+    openLog(true);
+  },
   'log-sel': d => { const id = +d.sid; ui.logSel.has(id) ? ui.logSel.delete(id) : ui.logSel.add(id); openLog(true); },
   'log-save': () => {
     const ids = [...ui.logSel].sort((a, b) => a - b);
     if (!ids.length) return;
+    const date = ui.logDate || today();
     ui.logSel = new Set();
     closeSheet();
-    logRecitations(ids);
+    logRecitations(ids, date);
   },
   'auth-open': () => openAuth('login'),
   'auth-mode': d => {
@@ -1603,6 +1820,13 @@ document.addEventListener('click', e => {
     y0 = null;
   });
 })();
+
+document.addEventListener('change', e => {
+  if (e.target.id !== 'log-date-input' || !e.target.value) return;
+  const t = today();
+  ui.logDate = e.target.value > addDays(t, -1) ? addDays(t, -1) : e.target.value;
+  openLog(true);
+});
 
 document.addEventListener('submit', e => {
   if (e.target.id !== 'auth-form') return;
