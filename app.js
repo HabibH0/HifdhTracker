@@ -52,7 +52,7 @@ const I = {
 };
 
 /* ---------- State ---------- */
-let state = load();
+let state = null;                              // loaded at startup (bottom of file), once every helper exists
 let ui = {
   tab: 'today', queueTab: 'weak', hifdhView: 'map', selecting: false, selected: new Set(),
   logSel: new Set(), logDate: null, logEarlier: false, barSel: null, chartRange: 14, theme: 'system', justDone: null,
@@ -106,12 +106,20 @@ function upgrade(s) {
 }
 
 function load() {
+  let raw = null;
+  try { raw = localStorage.getItem(STORAGE_KEY); } catch (e) {}
+  if (!raw) return freshState();
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return upgrade(JSON.parse(raw));
-  } catch (e) {}
-  return freshState();
+    return upgrade(JSON.parse(raw));
+  } catch (e) {
+    // Never silently drop saved data: keep the unreadable copy aside before starting fresh.
+    console.error('Could not load saved planner', e);
+    try { localStorage.setItem(`${STORAGE_KEY}.recovery.${Date.now()}`, raw); } catch (err) {}
+    return freshState();
+  }
 }
+
+const hasPlannerData = st => !!st && Object.values(st.sections || {}).some(s => s.memorised);
 
 function save() {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
@@ -1465,6 +1473,7 @@ const payload = () => ({ ...state, settings: { ...state.settings, dayOffset: 0 }
 
 function markDirty() {
   if (!auth) return;
+  if (hasPlannerData(state)) sync.allowEmpty = false;
   sync.dirty = true;
   saveSync();
   schedulePush();
@@ -1481,6 +1490,12 @@ async function pushNow() {
   if (!auth || !sync.dirty) return;
   if (previewing()) return setSyncStatus('paused');
   if (pushing) return schedulePush();
+  // An empty planner never overwrites the account unless you chose Reset; fetch the account instead.
+  if (!hasPlannerData(state) && !sync.allowEmpty) {
+    sync.dirty = false;
+    saveSync();
+    return pull();
+  }
   pushing = true;
   setSyncStatus('syncing');
   const sentAt = state.updatedAt;
@@ -1510,7 +1525,11 @@ async function pull() {
   setSyncStatus('syncing');
   try {
     const remote = await api('GET', '/state');
-    if (remote.version > sync.version) resolveWith(remote);
+    if (!hasPlannerData(state) && hasPlannerData(remote.state) && !sync.allowEmpty) {
+      // This device has nothing (new, cleared, or couldn't read its data) but the account does.
+      adopt(remote);
+      toast('Restored your hifdh from your account');
+    } else if (remote.version > sync.version) resolveWith(remote);
     sync.lastSyncedAt = Date.now();
     saveSync();
     setSyncStatus('idle');
@@ -1792,7 +1811,15 @@ const actions = {
     pushNow();
     toast('Your account now uses this device’s data');
   },
-  'reset-yes': () => { state = freshState(); closeSheet(); ui.tab = 'today'; commit(); toast('Everything reset'); },
+  'reset-yes': () => {
+    state = freshState();
+    sync.allowEmpty = true;                     // the one case where an empty planner may replace the account's
+    saveSync();
+    closeSheet();
+    ui.tab = 'today';
+    commit();
+    toast('Everything reset');
+  },
 };
 
 document.addEventListener('click', e => {
@@ -1842,6 +1869,7 @@ document.addEventListener('visibilitychange', () => {
 });
 addEventListener('online', () => pull());
 
+state = load();
 applyTheme(ui.theme);
 normalize();
 refreshPlan();
