@@ -33,6 +33,13 @@ has gone longest untouched, on top of the normal amount.
 next most overdue section, or one due within two days (never one waiting out its check-in gap). If
 nothing in confidence building is due, that slot is skipped for the day.
 
+**Forest.** Hifdh → Forest shows a woodland of 30 trees, one per juz (juz 1 at the back left, 30 at the
+front right; tap a tree to see which juz it is). Species vary — oak, pine, cypress, date palm, olive and
+birch. Each grows from the planner's state rather than a count of recitations: weak halves are seedlings, unconfident ones young trees (growing along their gaps), and
+confident ones mature trees, fully grown once each half has been maintained 3 times as confident. A tree
+left well past its planned revision drops some leaves (never more than about half) and revising brings
+them back.
+
 Cycle length, daily amounts, the check-in gap, the keep-warm interval and the longest confident gap are
 configurable in Settings. The forecast and projected dates come from running these rules forward.
 

@@ -178,6 +178,8 @@ function relDay(s) {
   if (n > 1 && n < 7) return parse(s).toLocaleDateString('en-GB', { weekday: 'long' });
   return parse(s).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
+/** relDay for mid-sentence use: "today" and "tomorrow" lowercased, dates and weekdays as they are. */
+const relDayInline = s => { const r = relDay(s); return r === 'Today' || r === 'Tomorrow' ? r.toLowerCase() : r; };
 /** "Today", "Yesterday" or "28 Sept" — for past dates. */
 function dayLabel(s) {
   const n = diffDays(s, today());
@@ -955,7 +957,7 @@ function listBlock(c, name, quota) {
     let why = quota ? `Nothing ${c === 'conf' ? 'to build confidence on' : 'in maintenance'} yet — skipped.` : 'Turned off in settings.';
     if (quota && c === 'conf' && inCat('conf').length) {
       const next = inCat('conf').map(nextScheduled).filter(Boolean).sort()[0];
-      why = `Nothing due today${next ? ` — next ${relDay(next).toLowerCase()}` : ''}.`;
+      why = `Nothing due today${next ? ` — next ${relDayInline(next)}` : ''}.`;
     }
     return `<section class="block" data-flip="b-${c}">${label(c, name)}<p class="skip">${why}</p></section>`;
   }
@@ -1056,13 +1058,14 @@ function renderMap() {
   sections().forEach(s => counts[cat(s)]++);
   const cur = state.weakQueue[0];
   const names = { weak: 'Weak', conf: 'Unconfident', maint: 'Confident', none: 'Not memorised' };
-  const statsView = ui.hifdhView === 'stats';
-  let html = head(`${fmtJuz(60 - counts.none)} of 30 juz memorised`, 'My hifdh', statsView ? '' :
+  const v = ui.hifdhView;
+  const views = { map: 'Map', stats: 'Stats', forest: 'Forest' };
+  let html = head(`${fmtJuz(60 - counts.none)} of 30 juz memorised`, 'My hifdh', v !== 'map' ? '' :
     `<button class="head-action ${ui.selecting ? 'on' : ''}" data-action="toggle-select">${ui.selecting ? 'Done' : 'Select'}</button>`);
-  html += segWrap('seg-hifdh', statsView ? 1 : 0, 2,
-    `<button class="${statsView ? '' : 'on'}" data-action="hifdh-view" data-v="map">Map</button>` +
-    `<button class="${statsView ? 'on' : ''}" data-action="hifdh-view" data-v="stats">Stats</button>`);
-  if (statsView) return html + renderStats();
+  html += segWrap('seg-hifdh', Object.keys(views).indexOf(v), 3, Object.entries(views).map(([k, name]) =>
+    `<button class="${v === k ? 'on' : ''}" data-action="hifdh-view" data-v="${k}">${name}</button>`).join(''));
+  if (v === 'stats') return html + renderStats();
+  if (v === 'forest') return html + renderForest();
   html += `<div class="legend qa">${Object.keys(names).map(c => `<span>${dot(c)}${names[c]} <b>${counts[c]}</b></span>`).join('')}</div>`;
   if (ui.selecting) html += `<p class="map-hint">Tap halves to select them, then choose a state below.</p>`;
   html += `<div class="grid qa">`;
@@ -1074,6 +1077,282 @@ function renderMap() {
   html += `</div>`;
   if (ui.selecting) html += `<div style="height:120px"></div>`;
   return html;
+}
+
+/* ---------- Forest ----------
+   One tree per juz, grown from the planner's own state rather than a tally of recitations:
+   weak → seedling, unconfident → young tree (growing along its gaps), confident → mature tree,
+   fully grown once maintained a few times. A tree well past its planned revision loses some
+   leaves — never all of them — and revising brings them back. */
+const FULL_AFTER = 3;                  // maintenance revisions before a confident half-juz is fully grown
+const STAGES = [
+  { k: 'plot', name: 'Not planted' }, { k: 'seedling', name: 'Seedling' }, { k: 'young', name: 'Young tree' },
+  { k: 'mature', name: 'Mature tree' }, { k: 'full', name: 'Fully grown' },
+];
+
+/** Revisions of a confident section since it became confident (all of them if confident from setup). */
+const maintRevs = sec => state.log.filter(e => e.s === sec.id && e.d > (sec.confidentSince || '')).length;
+
+/** Growth of one half-juz, 0 (not memorised) to 1 (confident and maintained). */
+function halfGrowth(sec) {
+  switch (cat(sec)) {
+    case 'weak': return 0.12 + 0.13 * Math.min(1, sec.cycleDone / cycleTarget(sec));
+    case 'conf': return 0.35 + 0.3 * (sec.confReady ? 1 : confStepOf(sec) / Math.max(1, confGaps().length - 1));
+    case 'maint': return 0.7 + 0.3 * Math.min(maintRevs(sec), FULL_AFTER) / FULL_AFTER;
+    default: return 0;
+  }
+}
+
+/** Foliage of one half-juz, 0.5–1: full until it's 1.5× past its planned gap, then thins gently. */
+function halfHealth(sec) {
+  const c = cat(sec);
+  if (c === 'none' || !sec.lastRevised || state.weakQueue.indexOf(sec.id) === 0) return 1;
+  const target = c === 'conf' ? confGap(sec) : c === 'maint' ? maintWeight(confidentDays(sec)) * avgMaintGap() : 14;
+  const r = elapsed(sec) / target;
+  return r <= 1.5 ? 1 : Math.max(0.5, 1 - (r - 1.5) * 0.25);
+}
+
+function juzTree(j) {
+  const halves = [state.sections[j * 2 - 1], state.sections[j * 2]];
+  const g = (halfGrowth(halves[0]) + halfGrowth(halves[1])) / 2;
+  const h = Math.min(...halves.filter(x => x.memorised).map(halfHealth), 1);
+  const stage = g === 0 ? 0 : g < 0.3 ? 1 : g < 0.68 ? 2 : g < 0.999 ? 3 : 4;
+  return { j, halves, g, h, stage };
+}
+
+/** Small deterministic jitter per juz so the forest isn't uniform. */
+const jitter = (j, k) => { const x = Math.sin(j * 12.9898 + k * 78.233) * 43758.5453; return x - Math.floor(x); };
+const f1 = n => n.toFixed(1);
+const mix = (a, pct, b) => `color-mix(in srgb, ${a} ${Math.round(pct)}%, ${b})`;
+
+/*
+ * Tree species. Each draws in a 60×68 box with its base at (30, 62), given growth g (0–1),
+ * health h (0.5–1), stage (2 young, 3 mature, 4 full) and the leaf colours already wilted by
+ * health. `keep(n)` thins n foliage pieces as health drops.
+ */
+const SPECIES = {
+  oak: {
+    name: 'Oak', tint: 'var(--leaf)',
+    draw({ j, g, stage, leaf, shade, keep, lean }) {
+      const th = 13 + 23 * g, tw = 1.4 + 2.6 * g, top = 62 - th, R = 6 + 11.5 * g;
+      let out = trunk(tw, top + R * 0.3, lean);
+      const BLOBS = [[0, 0, 1], [-0.62, 0.32, 0.72], [0.62, 0.3, 0.74], [-0.36, -0.5, 0.7], [0.4, -0.46, 0.68], [0, -0.78, 0.6], [0.02, 0.5, 0.66]];
+      const n = stage === 2 ? 3 : stage === 3 ? 6 : 7;
+      const blobs = BLOBS.slice(0, keep(n))
+        .map(([dx, dy, r], i) => [30 + lean + dx * R + (jitter(j, i + 3) - 0.5) * 2, top + dy * R, r * R * (0.92 + jitter(j, i + 9) * 0.16)]);
+      out += blobs.map(([x, y, r]) => `<circle cx="${f1(x)}" cy="${f1(y + 1.6)}" r="${f1(r)}" fill="${shade}"/>`).join('');
+      out += blobs.map(([x, y, r]) => `<circle cx="${f1(x)}" cy="${f1(y)}" r="${f1(r)}" fill="${leaf}"/>`).join('');
+      if (stage === 4) out += dots(j, [[-0.4, -0.1], [0.35, -0.3], [0.1, 0.3], [-0.15, -0.6], [0.55, 0.25]], 30 + lean, top, R, 'var(--bloom)', 1.3);
+      return out;
+    },
+  },
+  pine: {
+    name: 'Pine', tint: mix('var(--leaf)', 58, '#123d2c'),
+    draw({ j, g, stage, h, leaf, shade, lean }) {
+      const sc = 0.45 + 0.55 * g, th = 7 + 9 * sc, tiers = stage === 2 ? 3 : 4;
+      const Ht = 13 * sc, W = 12.5 * sc * (0.78 + 0.22 * h);
+      let out = trunk(1.1 + 1.5 * sc, 62 - th - 2, lean * 0.4);
+      for (let i = 0; i < tiers; i++) {
+        const y = 62 - th + 2 - i * Ht * 0.58, w = W * (1 - i * 0.2), x = 30 + lean * 0.4;
+        out += `<path d="M${f1(x - w)} ${f1(y + 1.5)} L${f1(x)} ${f1(y - Ht + 1.5)} L${f1(x + w)} ${f1(y + 1.5)}Z" fill="${shade}"/>`;
+        out += `<path d="M${f1(x - w)} ${f1(y)} L${f1(x)} ${f1(y - Ht)} L${f1(x + w)} ${f1(y)}Z" fill="${leaf}"/>`;
+      }
+      if (stage === 4) {
+        out += [0, 1, 2].map(i => {
+          const y = 62 - th + 1 - i * Ht * 0.58, w = W * (1 - i * 0.2) * 0.7 * (i % 2 ? -1 : 1);
+          return `<ellipse cx="${f1(30 + lean * 0.4 + w)}" cy="${f1(y)}" rx="1.2" ry="1.8" fill="${mix('var(--trunk)', 75, '#000')}"/>`;
+        }).join('');
+      }
+      return out;
+    },
+  },
+  cypress: {
+    name: 'Cypress', tint: mix('var(--leaf)', 55, '#1f4a2a'),
+    draw({ j, g, stage, h, leaf, shade, keep }) {
+      const sc = 0.45 + 0.55 * g, th = 4 + 4 * sc, Hc = 20 + 32 * sc, rx = (2.5 + 4.5 * sc) * (0.75 + 0.25 * h);
+      const cy = 62 - th - Hc / 2;
+      let out = trunk(1 + sc, 62 - th - 2, 0);
+      out += `<ellipse cx="30.8" cy="${f1(cy + 1.5)}" rx="${f1(rx)}" ry="${f1(Hc / 2)}" fill="${shade}"/>`;
+      out += `<ellipse cx="30" cy="${f1(cy)}" rx="${f1(rx)}" ry="${f1(Hc / 2)}" fill="${leaf}"/>`;
+      const lumps = [[-0.7, 0.25, 0.5], [0.7, 0.05, 0.48], [-0.6, -0.25, 0.42], [0.6, -0.35, 0.4]].slice(0, keep(stage === 2 ? 2 : 4));
+      out += lumps.map(([dx, dy, r]) => `<ellipse cx="${f1(30 + dx * rx)}" cy="${f1(cy + dy * Hc / 2)}" rx="${f1(r * rx)}" ry="${f1(r * rx * 2)}" fill="${leaf}"/>`).join('');
+      if (stage === 4) out += dots(j, [[-0.3, 0.2], [0.35, -0.1], [-0.1, -0.5], [0.25, 0.55]], 30, cy, rx * 1.6, mix('var(--bloom)', 60, 'var(--trunk)'), 1);
+      return out;
+    },
+  },
+  palm: {
+    name: 'Date palm', tint: mix('var(--leaf)', 78, '#b9c94a'),
+    draw({ j, g, stage, leaf, shade, keep }) {
+      const sc = 0.45 + 0.55 * g, th = 16 + 30 * sc, bend = (jitter(j, 5) - 0.5) * 10 * sc;
+      const tx = 30 + bend, ty = 62 - th;
+      let out = `<path d="M30 62.5 Q${f1(30 + bend * 0.1)} ${f1(62 - th * 0.55)} ${f1(tx)} ${f1(ty)}" stroke="var(--trunk)" stroke-width="${f1(1.4 + 1.6 * sc)}" fill="none" stroke-linecap="round"/>`;
+      const n = stage === 2 ? 5 : 7, L = 7 + 11 * sc;
+      const angles = [-90, -135, -45, -170, -10, -112, -68].slice(0, keep(n));
+      const frond = (a, col, dy) => {
+        const r = a * Math.PI / 180, droop = Math.abs(Math.cos(r)) * L * 0.55;
+        const ex = tx + Math.cos(r) * L, ey = ty + Math.sin(r) * L + droop + dy;
+        const mx = tx + Math.cos(r) * L * 0.5, my = ty + Math.sin(r) * L * 0.5 - 2 + dy;
+        const nx = -Math.sin(r) * 2.3 * sc, ny = Math.cos(r) * 2.3 * sc;
+        return `<path d="M${f1(tx)} ${f1(ty + dy)} Q${f1(mx + nx)} ${f1(my + ny)} ${f1(ex)} ${f1(ey)} Q${f1(mx - nx)} ${f1(my - ny)} ${f1(tx)} ${f1(ty + dy)}Z" fill="${col}"/>`;
+      };
+      out += angles.map(a => frond(a, shade, 1.2)).join('') + angles.map(a => frond(a, leaf, 0)).join('');
+      if (stage === 4) {
+        out += [[-2, 2.5], [0, 3.6], [2, 2.6], [-1, 4.6], [1.2, 4.8]].map(([dx, dy]) =>
+          `<circle cx="${f1(tx + dx)}" cy="${f1(ty + dy)}" r="1.2" fill="${mix('var(--bloom)', 55, '#8a3d1c')}"/>`).join('');
+      }
+      return out;
+    },
+  },
+  olive: {
+    name: 'Olive', tint: mix('var(--leaf)', 45, '#a3b39b'),
+    draw({ j, g, stage, leaf, shade, keep, lean }) {
+      const th = 10 + 15 * g, top = 62 - th, R = 6 + 9.5 * g, tw = 1.6 + 2.4 * g;
+      let out = trunk(tw, top + R * 0.2, lean);
+      out += `<path d="M${f1(30 + lean * 0.5)} ${f1(62 - th * 0.55)} Q${f1(30 + lean - R * 0.3)} ${f1(top + R * 0.3)} ${f1(30 + lean - R * 0.55)} ${f1(top + R * 0.15)}" stroke="var(--trunk)" stroke-width="${f1(tw * 0.6)}" fill="none" stroke-linecap="round"/>`;
+      const BLOBS = [[0, 0, 1], [-0.75, 0.12, 0.72], [0.75, 0.1, 0.74], [-0.38, -0.38, 0.66], [0.4, -0.34, 0.62], [0, 0.32, 0.6]];
+      const n = stage === 2 ? 3 : stage === 3 ? 5 : 6;
+      const blobs = BLOBS.slice(0, keep(n)).map(([dx, dy, r], i) => [30 + lean + dx * R, top + dy * R, r * R * (0.9 + jitter(j, i + 11) * 0.2)]);
+      out += blobs.map(([x, y, r]) => `<ellipse cx="${f1(x)}" cy="${f1(y + 1.4)}" rx="${f1(r * 1.25)}" ry="${f1(r * 0.78)}" fill="${shade}"/>`).join('');
+      out += blobs.map(([x, y, r]) => `<ellipse cx="${f1(x)}" cy="${f1(y)}" rx="${f1(r * 1.25)}" ry="${f1(r * 0.78)}" fill="${leaf}"/>`).join('');
+      if (stage === 4) out += dots(j, [[-0.5, 0.1], [0.3, -0.15], [0.7, 0.2], [-0.1, 0.35], [-0.75, -0.05]], 30 + lean, top, R, 'var(--olive)', 1.1);
+      return out;
+    },
+  },
+  birch: {
+    name: 'Birch', tint: mix('var(--leaf)', 70, '#b7d36a'),
+    draw({ j, g, stage, leaf, shade, keep, lean }) {
+      const th = 16 + 26 * g, tw = 1.1 + 1.6 * g, top = 62 - th, R = 5.5 + 9.5 * g;
+      let out = trunk(tw, top + R * 0.4, lean, 'var(--birch)');
+      out += [0.25, 0.45, 0.65].map((f, i) => {
+        const y = 62 - th * f, x = 30 + lean * (1 - f) * 0.3;
+        return `<path d="M${f1(x - tw * 0.5)} ${f1(y)} h${f1(tw * (0.5 + jitter(j, i + 50) * 0.4))}" stroke="${mix('var(--trunk)', 60, '#000')}" stroke-width="0.8"/>`;
+      }).join('');
+      const BLOBS = [[0, 0, 0.8], [-0.45, 0.4, 0.6], [0.45, 0.35, 0.6], [0, -0.6, 0.72], [-0.32, -0.25, 0.56], [0.34, -0.22, 0.56], [0, 0.62, 0.5]];
+      const n = stage === 2 ? 3 : stage === 3 ? 6 : 7;
+      const blobs = BLOBS.slice(0, keep(n)).map(([dx, dy, r], i) => [30 + lean + dx * R, top + dy * R * 1.2, r * R * (0.9 + jitter(j, i + 13) * 0.2)]);
+      out += blobs.map(([x, y, r]) => `<ellipse cx="${f1(x)}" cy="${f1(y + 1.4)}" rx="${f1(r * 0.82)}" ry="${f1(r)}" fill="${shade}"/>`).join('');
+      out += blobs.map(([x, y, r]) => `<ellipse cx="${f1(x)}" cy="${f1(y)}" rx="${f1(r * 0.82)}" ry="${f1(r)}" fill="${leaf}"/>`).join('');
+      if (stage === 4) out += dots(j, [[-0.3, 0.1], [0.3, -0.3], [0.1, 0.45], [-0.2, -0.65]], 30 + lean, top, R, 'var(--bloom)', 1);
+      return out;
+    },
+  },
+};
+const SPECIES_KEYS = Object.keys(SPECIES);
+// Spread species so neighbours (across and between rows) differ.
+const speciesOf = j => SPECIES[SPECIES_KEYS[([0, 3, 1, 4, 2, 5][((j - 1) % 6 + Math.floor((j - 1) / 6) * 2) % 6])]];
+
+/** A tapered trunk from the ground up to `topY`. */
+function trunk(tw, topY, lean, fill = 'var(--trunk)') {
+  return `<path d="M${f1(30 - tw)} 62.5 Q${f1(30 - tw * 0.6)} ${f1((62 + topY) / 2)} ${f1(30 + lean - tw * 0.35)} ${f1(topY)} L${f1(30 + lean + tw * 0.35)} ${f1(topY)} Q${f1(30 + tw * 0.6)} ${f1((62 + topY) / 2)} ${f1(30 + tw)} 62.5Z" fill="${fill}"/>`;
+}
+/** Blossoms or fruit scattered over a canopy. */
+function dots(j, pts, cx, cy, R, fill, r) {
+  return pts.map(([dx, dy], i) => `<circle cx="${f1(cx + dx * R)}" cy="${f1(cy + dy * R)}" r="${f1(r + jitter(j, i + 20) * 0.5)}" fill="${fill}"/>`).join('');
+}
+
+/** A juz's tree in its 60×68 box (base at 30, 62). */
+function treeShape({ j, g, h, stage }) {
+  const sp = speciesOf(j);
+  const leaf = mix(sp.tint, h * 100, 'var(--wilt)');
+  const shade = mix(leaf, 78, '#000');
+  let out = `<ellipse cx="30" cy="63" rx="${stage ? 14 : 11}" ry="3" fill="var(--soil)"/>`;
+  if (stage === 0) {
+    out += `<ellipse cx="30" cy="61.5" rx="7" ry="2.2" fill="none" stroke="var(--faint)" stroke-width="1" stroke-dasharray="2 2.5"/>`;
+  } else if (stage === 1) {
+    const sc = 0.75 + g * 1.6, top = 62 - 12 * sc;
+    out += `<path d="M30 62 Q${f1(29 + jitter(j, 1) * 2)} ${f1((62 + top) / 2)} 30 ${f1(top)}" stroke="var(--trunk)" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+      <ellipse cx="${f1(30 - 4 * sc)}" cy="${f1(top + 1)}" rx="${f1(4.2 * sc)}" ry="${f1(2 * sc)}" transform="rotate(-28 ${f1(30 - 4 * sc)} ${f1(top + 1)})" fill="${leaf}"/>
+      <ellipse cx="${f1(30 + 4 * sc)}" cy="${f1(top)}" rx="${f1(4.4 * sc)}" ry="${f1(2.1 * sc)}" transform="rotate(24 ${f1(30 + 4 * sc)} ${f1(top)})" fill="${leaf}"/>`;
+  } else {
+    // Thin foliage as health drops: at worst about half is left.
+    const keep = n => Math.max(2, Math.round(n * (0.1 + 0.9 * h)));
+    out += sp.draw({ j, g, h, stage, leaf, shade, keep, lean: (jitter(j, 2) - 0.5) * 3 });
+  }
+  // Fallen leaves under a tree that's been left a while.
+  if (stage && h < 0.95) {
+    out += Array.from({ length: Math.round((1 - h) * 8) }, (_, i) =>
+      `<ellipse cx="${f1(18 + jitter(j, i + 30) * 24)}" cy="${f1(62 + jitter(j, i + 40) * 2.5)}" rx="1.6" ry="0.8" fill="var(--wilt)"/>`).join('');
+  }
+  return out;
+}
+
+const treeSvg = t => `<svg viewBox="0 0 60 68" aria-hidden="true">${treeShape(t)}</svg>`;
+
+/*
+ * The forest scene: 30 trees on a meadow, back rows smaller and higher for depth, placed in
+ * loose staggered rows with jitter so it reads as a wood rather than a grid. Juz 1 is at the
+ * back left and juz 30 at the front right. Drawn back to front so nearer trees overlap.
+ */
+const SCENE_W = 360, SCENE_H = 300;
+function forestScene(trees) {
+  const placed = trees.map(t => {
+    const r = Math.floor((t.j - 1) / 6), c = (t.j - 1) % 6;
+    const x = Math.min(SCENE_W - 24, Math.max(24, 32 + c * 59 + (r % 2 ? 14 : -6) + (jitter(t.j, 60) - 0.5) * 26));
+    const y = 92 + r * 48 + (jitter(t.j, 61) - 0.5) * 16;
+    const sc = 0.88 + 0.5 * (y - 70) / 230;
+    return { t, x, y, sc };
+  }).sort((a, b) => a.y - b.y);
+
+  const grass = Array.from({ length: 34 }, (_, i) => {
+    const x = 8 + jitter(i, 70) * (SCENE_W - 16), y = 70 + jitter(i, 71) * (SCENE_H - 78), k = 0.6 + (y / SCENE_H) * 0.7;
+    return `<path d="M${f1(x)} ${f1(y)} l${f1(-1.5 * k)} ${f1(-4 * k)} M${f1(x)} ${f1(y)} l0 ${f1(-5 * k)} M${f1(x)} ${f1(y)} l${f1(1.6 * k)} ${f1(-3.8 * k)}"/>`;
+  }).join('');
+
+  const groups = placed.map(({ t, x, y, sc }) => `
+    <g class="ftree" data-action="juz" data-j="${t.j}" role="button" tabindex="0" aria-label="Juz ${t.j}: ${STAGES[t.stage].name}"
+      transform="translate(${f1(x - 30 * sc)} ${f1(y - 62 * sc)}) scale(${sc.toFixed(3)})">
+      <rect x="10" y="${t.stage > 1 ? 4 : 44}" width="40" height="${t.stage > 1 ? 62 : 22}" fill="transparent"/>
+      ${treeShape(t)}
+    </g>`).join('');
+
+  return `<svg class="scene" viewBox="0 0 ${SCENE_W} ${SCENE_H}" role="group" aria-label="Forest of 30 juz">
+    <defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="var(--sky)"/><stop offset="1" stop-color="var(--meadow)"/></linearGradient></defs>
+    <rect width="${SCENE_W}" height="${SCENE_H}" fill="url(#sky)"/>
+    <path d="M0 64 Q70 46 150 58 T290 52 T${SCENE_W} 56 V${SCENE_H} H0Z" fill="var(--meadow)"/>
+    <path d="M0 76 Q90 62 190 72 T${SCENE_W} 68 V${SCENE_H} H0Z" fill="var(--meadow-2)"/>
+    <g class="grass">${grass}</g>
+    ${groups}
+  </svg>`;
+}
+
+function renderForest() {
+  const trees = Array.from({ length: 30 }, (_, i) => juzTree(i + 1));
+  const counts = STAGES.map((_, k) => trees.filter(t => t.stage === k).length);
+  const full = counts[4];
+  const planted = 30 - counts[0];
+  const thirsty = trees.filter(t => t.stage && t.h < 0.95).length;
+  const pct = trees.reduce((n, t) => n + t.g, 0) / 30 * 100;
+  const sub = full === 30 ? 'Your Qur’an garden is complete'
+    : planted ? `${plural(planted, 'tree')} planted${thirsty ? ` · ${thirsty} could use a revision` : ''}`
+      : 'Trees appear as you mark juz as memorised.';
+
+  return `
+    <section class="block qa"><div class="card focus khatm">
+      <div class="khatm-top"><span class="big" ${anim('forest-full', 'bump', full)}>${full}</span>
+        <span class="muted">of 30 trees fully grown</span></div>
+      <div class="bar"><i ${anim('forest-p', 'w', pct)} style="background:var(--leaf)"></i></div>
+      <div class="khatm-sub"><span>${sub}</span><span>${Math.round(pct)}%</span></div>
+    </div></section>
+    <div class="legend qa">${STAGES.slice(1).map((st, k) => `<span>${st.name} <b>${counts[k + 1]}</b></span>`).join('')}</div>
+    <div class="card forest qa">${forestScene(trees)}</div>`;
+}
+
+function openJuz(j) {
+  sheetSid = null;
+  const t = juzTree(j);
+  const health = !t.stage ? 'Not memorised yet' : t.h >= 0.95 ? 'Looking healthy' : t.h >= 0.75 ? 'Could use a revision' : 'Overdue for revision — some leaves have fallen';
+  const row = sec => {
+    const c = cat(sec);
+    const next = nextScheduled(sec);
+    const sub = c === 'none' ? 'Not memorised' : `${CAT_NAME[c]}${next ? ` · next ${relDayInline(next)}` : ''}`;
+    return opt('open', sec.id, `${dot(c)}${halfOf(sec.id) === 1 ? '1st' : '2nd'} half`, sub);
+  };
+  openSheet(`
+    <div class="sh-head"><h2>Juz ${j}</h2><p>${JUZ_NAMES[j - 1]} · ${t.stage ? `${speciesOf(j).name} · ` : ''}${STAGES[t.stage].name}</p></div>
+    <div class="tree-big">${treeSvg(t)}</div>
+    <p class="status">${health}</p>
+    <div class="card list opts">${t.halves.map(row).join('')}</div>`);
 }
 
 /* ---------- Stats ---------- */
@@ -1965,6 +2244,7 @@ const actions = {
     render();
   },
   'eta-info': () => openEtaInfo(),
+  juz: d => openJuz(+d.j),
   'log-open': () => { ui.logSel = new Set(); ui.logDate = null; ui.logEarlier = false; openLog(); },
   'log-date': d => {
     const t = today();
@@ -2015,6 +2295,13 @@ document.addEventListener('click', e => {
   if (!el || el.disabled) return;
   const fn = actions[el.dataset.action];
   if (fn) { e.stopPropagation(); fn(el.dataset, el, e); }
+});
+
+document.addEventListener('keydown', e => {
+  const el = e.target.closest?.('g[role="button"][data-action]');
+  if (!el || (e.key !== 'Enter' && e.key !== ' ')) return;
+  e.preventDefault();
+  actions[el.dataset.action]?.(el.dataset, el, e);
 });
 
 // Swipe the sheet down to close.
