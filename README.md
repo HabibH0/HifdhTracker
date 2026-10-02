@@ -11,12 +11,30 @@ Each half-juz has two properties: **strength** (weak / strong) and **confidence*
 | State | Queue | Daily default |
 | --- | --- | --- |
 | Weak | Strengthening — one section at a time, 3-day cycle (relearn → repeat → consolidate) | ½ juz |
-| Strong · unconfident | Confidence building — rotates longest-unrevised first | ½ juz |
-| Strong · confident | Maintenance — rotates longest-unrevised first | 1 juz |
+| Strong · unconfident | Confidence building — growing gaps, most overdue first | ½ juz |
+| Strong · confident | Maintenance — weighted rotation | 1 juz |
 
 Lifecycle: `weak → strengthening cycle → strong/unconfident → confidence queue → strong/confident → maintenance`
 
-If a queue is empty, that category is skipped for the day. Cycle length, daily amounts and the confidence check-in threshold are configurable in Settings.
+**Confidence building.** After its strengthening cycle a section comes back after gaps of 1, 2, 3, 5, 7,
+10 and 14 days. The daily amount is fixed: if more are due than fit, the most overdue (relative to its
+gap) go first and the rest wait. Late revisions move on to the next gap as normal, and an extra
+recitation you log counts as the next step. Once a section holds up over the 14-day gap you're asked if
+it's confident; "keep practising" asks again after another 14-day gap.
+
+**Maintenance.** Sections aim for a share of the average gap (number of confident sections ÷ daily
+amount): 0.6× for their first 30 days as confident, 1× up to 90 days, 1.3× after that (and for anything
+marked confident at setup). No section goes longer than 1.5× the average.
+
+**Waiting weak sections.** Every 3 days, an optional "Keep warm" read of whichever waiting weak section
+has gone longest untouched, on top of the normal amount.
+
+**Spare capacity.** When there's nothing to strengthen, the weak slot goes to confidence building: the
+next most overdue section, or one due within two days (never one waiting out its check-in gap). If
+nothing in confidence building is due, that slot is skipped for the day.
+
+Cycle length, daily amounts, the check-in gap, the keep-warm interval and the longest confident gap are
+configurable in Settings. The forecast and projected dates come from running these rules forward.
 
 ## Accounts and sync
 

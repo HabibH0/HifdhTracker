@@ -152,6 +152,7 @@ h1 { font-family: var(--serif); font-weight: 500; font-size: 34px; line-height: 
 .check:active { transform: scale(.88); }
 .check svg { width: 13px; height: 13px; stroke: #fff; fill: none; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(.5); transition: all .2s; }
 .check.on { border-color: transparent; }
+.check.on.weak { background: var(--weak); }
 .check.on.conf { background: var(--conf); }
 .check.on.maint { background: var(--maint); }
 .check.on svg { opacity: 1; transform: none; }

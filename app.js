@@ -5,8 +5,8 @@
    Each half-juz (60 sections) has: memorised?, strength, confidence.
    Category (which queue it lives in) is derived:
      weak                   -> strengthening queue (one at a time, N-day cycle)
-     strong + unconfident   -> confidence queue   (rotating, ~½ juz/day)
-     strong + confident     -> maintenance        (oldest first, ~1 juz/day)
+     strong + unconfident   -> confidence queue   (growing gaps 1, 2, 3 … 14 days, ~½ juz/day)
+     strong + confident     -> maintenance        (weighted rotation, ~1 juz/day)
    ========================================================================= */
 
 const STORAGE_KEY = 'hifdh-planner.v1';
@@ -25,9 +25,19 @@ const DEFAULT_SETTINGS = {
   weakPerDay: 1,      // half-juz of weak material per day (one section at a time)
   confPerDay: 1,      // half-juz from the confidence queue per day
   maintPerDay: 2,     // half-juz from maintenance per day
-  promoteAfter: 7,    // confidence revisions before suggesting "confident"
+  checkinGap: 14,     // final confidence gap (days); holding up over it prompts "confident?"
+  maxGapPct: 150,     // no confident section goes longer than this % of the average gap
+  touchEvery: 3,      // days between light reads of sections waiting in the weak queue (0 = off)
   dayOffset: 0,       // preview tool: pretend it's N days later
 };
+
+// Gaps (days) between confidence revisions, ending at the check-in gap.
+const BASE_GAPS = [1, 2, 3, 5, 7, 10, 14, 21, 30];
+const ladder = final => [...BASE_GAPS.filter(g => g < final), final];
+
+// Confident sections: target gap as a share of the average, by how long they've been confident.
+const NEW_CONFIDENT_DAYS = 30, SETTLED_CONFIDENT_DAYS = 90;
+const maintWeight = days => days == null || days >= SETTLED_CONFIDENT_DAYS ? 1.3 : days >= NEW_CONFIDENT_DAYS ? 1 : 0.6;
 
 const CYCLE_GUIDE = [
   { t: 'Relearn', d: 'Get comfortable reciting it again.' },
@@ -71,7 +81,7 @@ function freshState() {
   for (let id = 1; id <= 60; id++) {
     sections[id] = {
       id, memorised: false, strength: 'weak', confidence: 'unconfident',
-      cycleDone: 0, extraDays: 0, confRevs: 0,
+      cycleDone: 0, extraDays: 0, confStep: 0, confReady: false,
       lastRevised: null, revisionCount: 0, enteredAt: 0, tie: Math.random(),
     };
   }
@@ -80,6 +90,8 @@ function freshState() {
     log: [],                                  // every recitation: { d: 'YYYY-MM-DD', s: sectionId, k: 'plan' | 'extra' }
     counters: { cycles: 0, promotions: 0 },
     journeys: [],                             // weak → confident: { s, from, to } dates
+    lastTouch: null,                          // last day a waiting weak section got a light read
+    schedVersion: 2,
   };
 }
 
@@ -95,6 +107,7 @@ function upgrade(s) {
       sec.weakSince = sec.enteredAt > 1e12 ? iso(new Date(sec.enteredAt)) : iso(new Date());
     }
   }
+  if (!(s.schedVersion >= 2)) migrateSchedule(s);
   if (!Array.isArray(s.log)) {
     // No history yet: seed one entry per section from its last revision so stats start sensibly.
     s.log = Object.values(s.sections)
@@ -103,6 +116,30 @@ function upgrade(s) {
       .sort((a, b) => a.d.localeCompare(b.d));
   }
   return s;
+}
+
+/**
+ * Move a planner saved before growing gaps onto them: unconfident sections start at the gap step
+ * matching their confidence revisions so far, and sections promoted in the last 90 days count as
+ * newly confident (anything confident from setup counts as long-established).
+ */
+function migrateSchedule(s) {
+  const oldCheckin = s.settings.promoteAfter || 7;
+  delete s.settings.promoteAfter;
+  const fin = ladder(s.settings.checkinGap).length - 1;
+  const now = iso(new Date());
+  for (const sec of Object.values(s.sections)) {
+    const revs = sec.confRevs || 0;
+    sec.confStep = Math.min(revs, fin);
+    sec.confReady = cat(sec) === 'conf' && revs >= oldCheckin;
+    delete sec.confRevs;
+    if (cat(sec) === 'maint') {
+      const j = s.journeys.filter(x => x.s === sec.id).sort((a, b) => b.to.localeCompare(a.to))[0];
+      if (j && diffDays(j.to, now) < SETTLED_CONFIDENT_DAYS) sec.confidentSince = j.to;
+    }
+  }
+  if (!('lastTouch' in s)) s.lastTouch = null;
+  s.schedVersion = 2;
 }
 
 function load() {
@@ -179,13 +216,43 @@ const sections = () => Object.values(state.sections);
 const inCat = c => sections().filter(s => cat(s) === c);
 const cycleTarget = s => state.settings.cycleLength + (s.extraDays || 0);
 
+const confGaps = () => ladder(state.settings.checkinGap);
+const confStepOf = sec => Math.min(sec.confStep || 0, confGaps().length - 1);
+/** Days an unconfident section should wait after its last revision before the next one. */
+const confGap = sec => confGaps()[confStepOf(sec)];
+/** Days since a section was last revised (Infinity if never). */
+const elapsed = (sec, t = today()) => sec.lastRevised ? diffDays(sec.lastRevised, t) : Infinity;
+/** Days a confident section has been confident, or null if confident from setup (long-established). */
+const confidentDays = (sec, t = today()) => sec.confidentSince ? diffDays(sec.confidentSince, t) : null;
+/** Average days between revisions of a confident section, given the maintenance amount. */
+const avgMaintGap = (n = inCat('maint').length) => Math.max(1, n / Math.max(state.settings.maintPerDay, 1e-9));
+
 /**
- * Rotation order for confidence / maintenance: longest-unrevised first. Ties are broken by each
- * section's random `tie`, which is redrawn whenever it's revised, so equal sections come up in
- * a fresh random order each time round (but the order doesn't jump between renders).
+ * How pressing a revision is: elapsed time over the section's target gap (1 = due). Unconfident
+ * sections follow their growing gaps. Confident ones aim for a share of the average gap (shorter
+ * when newly confident), and anything past the longest-gap limit jumps ahead of everything else.
  */
-function rotation(c) {
-  return inCat(c).sort((a, b) => (a.lastRevised || '').localeCompare(b.lastRevised || '') || a.tie - b.tie);
+function urgency(c, el, step, confDays, avg) {
+  if (c === 'conf') return el / confGaps()[Math.min(step, confGaps().length - 1)];
+  const cap = avg * state.settings.maxGapPct / 100;
+  return el >= cap ? 1000 + el / cap : el / (maintWeight(confDays) * avg);
+}
+
+/**
+ * Queue order for confidence / maintenance: most urgent first. Ties are broken by each section's
+ * random `tie`, which is redrawn whenever it's revised, so equal sections come up in a fresh
+ * random order each time round (but the order doesn't jump between renders).
+ */
+function queueOrder(c, t = today()) {
+  const avg = avgMaintGap();
+  const u = sec => urgency(c, elapsed(sec, t), confStepOf(sec), confidentDays(sec, t), avg);
+  return inCat(c).map(sec => [sec, u(sec)]).sort((a, b) => b[1] - a[1] || a[0].tie - b[0].tie).map(x => x[0]);
+}
+const isDue = (sec, t = today()) => elapsed(sec, t) >= confGap(sec);
+/** A queue as listed: in the order sections come up, which can differ from today's urgency as gaps play out. */
+function queueList(c) {
+  const when = sec => nextScheduled(sec) || '9999';
+  return queueOrder(c).map((sec, i) => [sec, i]).sort((a, b) => when(a[0]).localeCompare(when(b[0])) || a[1] - b[1]).map(x => x[0]);
 }
 
 function normalize() {
@@ -206,7 +273,9 @@ function classify(id, patch) {
   if (before !== after) {
     s.enteredAt = Date.now();
     s.tie = Math.random();
-    if (after === 'conf') s.confRevs = 0;
+    if (after === 'conf') { s.confStep = 0; s.confReady = false; }
+    if (after === 'maint' && before === 'conf') s.confidentSince = today();
+    if (after !== 'maint') delete s.confidentSince;
     if (after === 'weak') { s.cycleDone = 0; s.extraDays = 0; s.weakSince ||= today(); }
     if (before === 'conf' && after === 'maint') state.counters.promotions++;
     if (after === 'maint' && s.weakSince) {
@@ -219,63 +288,80 @@ function classify(id, patch) {
 }
 
 /* ---------- Daily plan ---------- */
+
+/**
+ * Build today's plan. Plan item cats: 'weak' (strengthening), 'conf', 'maint', and 'touch', an
+ * optional light read of a section waiting in the weak queue. A 'conf' item with `spare` uses the
+ * weak slot when there's nothing to strengthen.
+ */
 function refreshPlan() {
   const t = today();
   if (!state.plan || state.plan.date !== t) state.plan = { date: t, items: [] };
   const p = state.plan;
   const S = state.sections;
-  const weakNow = state.weakQueue.slice(0, state.settings.weakPerDay);
+  const st = state.settings;
+  const weakNow = state.weakQueue.slice(0, st.weakPerDay);
+  const waiting = state.weakQueue.slice(st.weakPerDay);
 
   // Keep completed items; drop pending items that no longer belong.
-  p.items = p.items.filter(it => it.done ||
-    (it.cat === 'weak' ? weakNow.includes(it.sid) : cat(S[it.sid]) === it.cat));
+  p.items = p.items.filter(it => it.done || (
+    it.cat === 'weak' ? weakNow.includes(it.sid)
+      : it.cat === 'touch' ? waiting.includes(it.sid)
+        : cat(S[it.sid]) === it.cat));
 
   const has = new Set(p.items.map(i => i.sid));
-  const count = c => p.items.filter(i => i.cat === c).length;
-  const fill = (c, list, quota) => {
+  const count = pred => p.items.filter(pred).length;
+  const fill = (c, list, quota, pred = i => i.cat === c, extra = {}) => {
     for (const s of list) {
-      if (count(c) >= quota) break;
-      if (!has.has(s.id)) { p.items.push({ sid: s.id, cat: c, done: false }); has.add(s.id); }
+      if (count(pred) >= quota) break;
+      if (!has.has(s.id)) { p.items.push({ sid: s.id, cat: c, done: false, ...extra }); has.add(s.id); }
     }
   };
-  fill('weak', weakNow.map(id => S[id]), state.settings.weakPerDay);
-  fill('conf', rotation('conf'), state.settings.confPerDay);
-  fill('maint', rotation('maint'), state.settings.maintPerDay);
+  fill('weak', weakNow.map(id => S[id]), st.weakPerDay);
+
+  // A free weak slot goes to confidence building: anything else due, else the next one due within
+  // two days (but not one waiting on its check-in gap, which has to be held for the full gap).
+  const spare = Math.max(0, st.weakPerDay - count(i => i.cat === 'weak'));
+  const isSpare = i => i.cat === 'conf' && i.spare;
+  let keep = spare - count(i => isSpare(i) && i.done);
+  p.items = p.items.filter(i => !isSpare(i) || i.done || keep-- > 0);
+  has.clear();
+  p.items.forEach(i => has.add(i.sid));
+  const confList = queueOrder('conf', t);
+  const due = confList.filter(s => isDue(s, t));
+  fill('conf', due, st.confPerDay, i => i.cat === 'conf' && !i.spare);
+  if (spare) {
+    const fin = confGaps().length - 1;
+    const wait = s => confGap(s) - elapsed(s, t);
+    const soon = confList.filter(s => !isDue(s, t) && elapsed(s, t) > 0 && confStepOf(s) < fin && wait(s) <= 2)
+      .sort((a, b) => wait(a) - wait(b));
+    fill('conf', [...due, ...soon], spare, isSpare, { spare: true });
+  }
+  fill('maint', queueOrder('maint', t), st.maintPerDay);
+
+  // Every few days, a light read of whichever waiting weak section has gone longest untouched.
+  if (st.touchEvery && waiting.length && !p.items.some(i => i.cat === 'touch')) {
+    const since = state.lastTouch ? diffDays(state.lastTouch, t) : Infinity;
+    if (since >= st.touchEvery || since < 0) {
+      const next = waiting.map(id => S[id]).sort((a, b) => (a.lastRevised || '').localeCompare(b.lastRevised || '') || a.tie - b.tie)[0];
+      p.items.push({ sid: next.id, cat: 'touch', done: false });
+      state.lastTouch = t;
+    }
+  }
 }
 
 function planItem(sid) { return state.plan.items.find(i => i.sid === sid); }
 
 /** Projected next revision date for a section, given current queues and quotas. */
 function nextScheduled(s) {
-  const t = today();
-  const c = cat(s);
-  const it = planItem(s.id);
-  if (it && !it.done && it.cat === c) return t;
-  if (c === 'none') return null;
-  if (c === 'weak') {
-    const q = state.weakQueue;
-    const idx = q.indexOf(s.id);
-    const doneToday = state.plan.items.some(i => i.cat === 'weak' && i.done);
-    let d = doneToday ? 1 : 0;
-    for (let k = 0; k < idx; k++) {
-      const o = state.sections[q[k]];
-      d += Math.max(1, cycleTarget(o) - o.cycleDone);
-    }
-    return addDays(t, d);
-  }
-  const quota = c === 'conf' ? state.settings.confPerDay : state.settings.maintPerDay;
-  if (!quota) return null;
-  const pendingToday = new Set(state.plan.items.filter(i => !i.done).map(i => i.sid));
-  const rest = rotation(c).filter(x => !pendingToday.has(x.id));
-  const k = rest.findIndex(x => x.id === s.id);
-  return addDays(t, 1 + Math.floor(k / quota));
+  return s.memorised ? simulate().next.get(s.id) || null : null;
 }
 
 function queuePosition(s) {
   const c = cat(s);
   if (c === 'weak') return state.weakQueue.indexOf(s.id) + 1;
   if (c === 'none') return null;
-  return rotation(c).findIndex(x => x.id === s.id) + 1;
+  return queueList(c).findIndex(x => x.id === s.id) + 1;
 }
 
 /* ---------- Recording revisions ---------- */
@@ -291,6 +377,21 @@ function recordRevision(s, kind, date = today()) {
 }
 
 /**
+ * Move an unconfident section along its gaps for a revision on `date`. Call before recording the
+ * revision. Same-day and back-dated revisions don't make a new gap. A revision after the final
+ * (check-in) gap returns 'promote'.
+ */
+function advanceConf(s, date) {
+  const prev = s.lastRevised;
+  if (prev && date <= prev) return null;
+  const fin = confGaps().length - 1;
+  if (confStepOf(s) < fin) { s.confStep = confStepOf(s) + 1; return null; }
+  // A day's slack, so a check-in revised a day early still counts.
+  if (prev && !s.confReady && diffDays(prev, date) >= confGaps()[fin] - 1) { s.confReady = true; return 'promote'; }
+  return null;
+}
+
+/**
  * Tick off today's planned item for a section. Returns the follow-up prompt it earns, if any:
  * 'cycle-end' when a strengthening cycle completes, 'promote' at the confidence check-in.
  */
@@ -298,14 +399,13 @@ function applyCompletion(sid) {
   const it = planItem(sid);
   if (!it || it.done) return null;
   const s = state.sections[sid];
-  it.prev = { lastRevised: s.lastRevised, revisionCount: s.revisionCount, cycleDone: s.cycleDone, confRevs: s.confRevs, tie: s.tie };
+  it.prev = { lastRevised: s.lastRevised, revisionCount: s.revisionCount, cycleDone: s.cycleDone, confStep: s.confStep, confReady: s.confReady, tie: s.tie };
   it.done = true;
+  const promote = it.cat === 'conf' ? advanceConf(s, today()) : null;
   recordRevision(s, 'plan');
   if (it.cat === 'weak') s.cycleDone++;
-  if (it.cat === 'conf') s.confRevs++;
   if (it.cat === 'weak' && s.cycleDone >= cycleTarget(s)) return 'cycle-end';
-  if (it.cat === 'conf' && s.confRevs === state.settings.promoteAfter) return 'promote';
-  return null;
+  return promote;
 }
 
 function showPrompt(prompt, sid) {
@@ -339,8 +439,8 @@ function undoItem(sid) {
 
 /**
  * Log recitations that weren't (or weren't all) on today's plan. A section still pending on
- * today's plan is simply ticked off; anything else counts as an extra revision, which moves it
- * to the back of its rotation and counts towards confidence building.
+ * today's plan is simply ticked off; anything else counts as an extra revision, which resets its
+ * gap and, for an unconfident section, counts as its next gap step.
  */
 function logRecitations(ids, date = today()) {
   const snapshot = JSON.stringify(state);
@@ -351,11 +451,8 @@ function logRecitations(ids, date = today()) {
     if (date === today() && it && !it.done) p = applyCompletion(sid);
     else {
       const s = state.sections[sid];
+      if (cat(s) === 'conf') p = advanceConf(s, date);
       recordRevision(s, 'extra', date);
-      if (cat(s) === 'conf') {
-        s.confRevs++;
-        if (s.confRevs === state.settings.promoteAfter) p = 'promote';
-      }
     }
     if (p && !prompt) { prompt = p; promptSid = sid; }
   }
@@ -380,6 +477,13 @@ function finishCycle(sid) {
   commit();
   const next = state.weakQueue[0];
   toast(next ? `Marked strong. Next up: ${title(next)}` : 'Marked strong. Weak queue is clear.');
+}
+
+/** "Keep practising" at the check-in: hold the final gap again before asking next time. */
+function keepPractising(sid) {
+  state.sections[sid].confReady = false;
+  commit();
+  toast(`Next check-in after another ${state.settings.checkinGap}-day gap`);
 }
 
 function extendCycle(sid) { state.sections[sid].extraDays++; commit(); toast('Cycle extended by a day'); }
@@ -414,36 +518,93 @@ function commit() {
 /* ---------- Forecast & stats ---------- */
 
 /**
- * Simulate the schedule forward to estimate when every memorised section is strong + confident.
- * Assumes each strengthening cycle ends on time and sections are confirmed confident at the
- * check-in. Returns { days, date, ready } — days of revision left counting today — or
- * { never: true } if the settings leave no room for confidence building.
+ * Run the planning rules forward from today, assuming every planned revision is done, strengthening
+ * cycles end on time and each section is confirmed confident at its check-in. Gives each section's
+ * next revision date and when everything is green. Cached until the state or the day changes.
+ *
+ * Returns { next: Map(sid -> date), days, date, ready }, days of revision left counting today, or
+ * { next, never: true, ready } if the settings never let everything turn green.
  */
-function greenForecast() {
-  const st = state.settings;
+function simulate() {
   const t = today();
-  const ready = inCat('conf').filter(s => s.confRevs >= st.promoteAfter).length;
-  const weak = state.weakQueue.map(id => ({ id, left: cycleTarget(state.sections[id]) - state.sections[id].cycleDone }));
-  const conf = rotation('conf').filter(s => s.confRevs < st.promoteAfter)
-    .map(s => ({ id: s.id, need: st.promoteAfter - s.confRevs }));
-  if (!weak.length && !conf.length) return { days: 0, date: t, ready };
-  if (!st.confPerDay) return { never: true, ready };
+  const key = `${state.updatedAt}|${t}|${state.plan.items.map(i => i.sid + (i.done ? 'd' : 'p')).join()}`;
+  if (simulate.key === key) return simulate.result;
 
-  const done = state.plan.items.filter(i => i.done);
-  const weakCap0 = done.some(i => i.cat === 'weak') ? 0 : 1;
-  const confCap0 = Math.max(0, st.confPerDay - done.filter(i => i.cat === 'conf').length);
-  const graduate = w => conf.push({ id: w.id, need: st.promoteAfter });
-  while (weak.length && weak[0].left <= 0) graduate(weak.shift());
+  const st = state.settings;
+  const gaps = confGaps();
+  const fin = gaps.length - 1;
+  // Days are numbered from today (0); `last` is the day of the last revision.
+  const secs = new Map(sections().filter(s => s.memorised).map(s => [s.id, {
+    id: s.id, c: cat(s), last: s.lastRevised ? -diffDays(s.lastRevised, t) : -Infinity,
+    step: confStepOf(s), ready: !!s.confReady, since: s.confidentSince ? -diffDays(s.confidentSince, t) : null,
+    left: cycleTarget(s) - s.cycleDone, tie: s.tie,
+  }]));
+  const weak = [...state.weakQueue];
+  const next = new Map();
+  const ready = [...secs.values()].filter(x => x.c === 'conf' && x.ready).length;
+  let lastTouch = state.lastTouch ? -diffDays(state.lastTouch, t) : -Infinity;
 
-  for (let day = 0; day < 3650; day++) {
-    if (!weak.length && !conf.length) return { days: day, date: addDays(t, Math.max(0, day - 1)), ready };
-    const confCap = day === 0 ? confCap0 : st.confPerDay;
-    const picked = conf.splice(0, Math.min(confCap, conf.length));
-    picked.forEach(x => { if (--x.need > 0) conf.push(x); });
-    if ((day === 0 ? weakCap0 : 1) && weak.length && --weak[0].left <= 0) graduate(weak.shift());
+  const toConf = x => { weak.splice(weak.indexOf(x.id), 1); Object.assign(x, { c: 'conf', step: 0, ready: false }); };
+  const revise = (x, d) => {
+    if (!next.has(x.id)) next.set(x.id, addDays(t, d));
+    if (x.c === 'conf' && d > x.last) {
+      if (x.step < fin) x.step++;
+      else if (!x.ready && d - x.last >= gaps[fin] - 1) { x.c = 'maint'; x.since = d; }
+    }
+    x.last = d;
+  };
+  const strengthen = (x, d) => { revise(x, d); if (--x.left <= 0) toConf(x); };
+  // Cycles already complete but not yet marked strong.
+  const graduateDone = () => weak.slice(0, st.weakPerDay).map(id => secs.get(id)).filter(x => x.left <= 0).forEach(toConf);
+  const green = () => !weak.length && [...secs.values()].every(x => x.c !== 'conf' || x.ready);
+  const order = (c, d) => {
+    const list = [...secs.values()].filter(x => x.c === c);
+    const avg = avgMaintGap(list.length);
+    const u = x => urgency(c, d - x.last, x.step, x.since == null ? null : d - x.since, avg);
+    return list.map(x => [x, u(x)]).sort((a, b) => b[1] - a[1] || a[0].tie - b[0].tie).map(y => y[0]);
+  };
+
+  // Today: whatever is still pending on the plan.
+  for (const it of state.plan.items.filter(i => !i.done)) {
+    const x = secs.get(it.sid);
+    if (!x) continue;
+    if (it.cat === 'weak') strengthen(x, 0); else revise(x, 0);
   }
-  return { never: true, ready };
+  graduateDone();
+
+  let greenDay = green() ? 0 : null;
+  for (let d = 1; d < 3650 && (greenDay === null || (next.size < secs.size && d < 400)); d++) {
+    graduateDone();
+    const active = weak.slice(0, st.weakPerDay).map(id => secs.get(id));
+    const waiting = weak.slice(st.weakPerDay).map(id => secs.get(id));
+    const spare = Math.max(0, st.weakPerDay - active.length);
+
+    const conf = order('conf', d);
+    const wait = x => gaps[x.step] - (d - x.last);
+    const due = conf.filter(x => wait(x) <= 0);
+    const soon = conf.filter(x => wait(x) > 0 && wait(x) <= 2 && x.last < d && x.step < fin).sort((a, b) => wait(a) - wait(b));
+    const picked = [...due.slice(0, st.confPerDay), ...[...due.slice(st.confPerDay), ...soon].slice(0, spare)];
+    const maint = order('maint', d).slice(0, st.maintPerDay);
+    const touch = st.touchEvery && waiting.length && d - lastTouch >= st.touchEvery
+      ? waiting.sort((a, b) => a.last - b.last || a.tie - b.tie)[0] : null;
+
+    active.forEach(x => strengthen(x, d));
+    picked.forEach(x => revise(x, d));
+    maint.forEach(x => revise(x, d));
+    if (touch) { revise(touch, d); lastTouch = d; }
+
+    if (greenDay === null && green()) greenDay = d;
+  }
+
+  const nothingLeft = !state.weakQueue.length && !inCat('conf').some(s => !s.confReady);
+  const result = greenDay === null ? { next, never: true, ready }
+    : nothingLeft ? { next, ready, days: 0, date: t }
+      : { next, ready, days: greenDay + 1, date: addDays(t, greenDay) };
+  simulate.key = key;
+  simulate.result = result;
+  return result;
 }
+const greenForecast = () => simulate();
 
 /** Everything the stats view shows, derived from the recitation log and current state. */
 function computeStats() {
@@ -505,7 +666,7 @@ function loadSample() {
     if (cat(s) !== 'weak') {
       s.lastRevised = addDays(t, -((i * 5) % 13) - 1);
       s.revisionCount = 3 + (i * 7) % 11;
-      if (cat(s) === 'conf') s.confRevs = (i * 3) % 6;
+      if (cat(s) === 'conf') s.confStep = (i * 3) % 6;
     }
     i++;
   }
@@ -518,6 +679,7 @@ function loadSample() {
     { s: 1, from: addDays(t, -21), to: addDays(t, -10) },
   ];
   [10, 5, 6, 53].forEach((id, k) => { state.sections[id].weakSince = addDays(t, -2 - k * 3); });
+  state.journeys.forEach(j => { state.sections[j.s].confidentSince = j.to; });
   // A month of recitation history (with a couple of missed days) so the stats have something to show.
   const ids = sections().filter(s => s.memorised).map(s => s.id);
   for (let back = 29; back >= 1; back--) {
@@ -690,7 +852,7 @@ function renderToday() {
       </div>`;
   }
 
-  const items = state.plan.items;
+  const items = state.plan.items.filter(i => i.cat !== 'touch');
   const total = items.length;
   const done = items.filter(i => i.done).length;
   const complete = total > 0 && done === total;
@@ -704,6 +866,7 @@ function renderToday() {
     </div>
     ${etaLine()}
     ${weakBlock()}
+    ${touchBlock()}
     ${listBlock('conf', 'Confidence', state.settings.confPerDay)}
     ${listBlock('maint', 'Maintenance', state.settings.maintPerDay)}
     <button class="log-btn" data-action="log-open" data-flip="log-btn">${I.plus}<span>Log a recitation</span></button>`;
@@ -777,30 +940,49 @@ function weakBlock() {
     </div></section>`;
 }
 
+/** Optional light read of a section waiting in the weak queue, every few days. */
+function touchBlock() {
+  const it = state.plan.items.find(i => i.cat === 'touch');
+  if (!it) return '';
+  const s = state.sections[it.sid];
+  return `<section class="block" data-flip="b-touch">${label('weak', 'Keep warm', 'optional', it.done ? 'Done' : '')}
+    <div class="card list">${planRow(it, 'weak', `<span class="meta">${it.done ? 'today' : shortAgo(s.lastRevised)}</span>`)}</div></section>`;
+}
+
 function listBlock(c, name, quota) {
   const items = state.plan.items.filter(i => i.cat === c);
   if (!items.length) {
-    const why = quota ? `Nothing ${c === 'conf' ? 'to build confidence on' : 'in maintenance'} yet — skipped.` : 'Turned off in settings.';
+    let why = quota ? `Nothing ${c === 'conf' ? 'to build confidence on' : 'in maintenance'} yet — skipped.` : 'Turned off in settings.';
+    if (quota && c === 'conf' && inCat('conf').length) {
+      const next = inCat('conf').map(nextScheduled).filter(Boolean).sort()[0];
+      why = `Nothing due today${next ? ` — next ${relDay(next).toLowerCase()}` : ''}.`;
+    }
     return `<section class="block" data-flip="b-${c}">${label(c, name)}<p class="skip">${why}</p></section>`;
   }
   const done = items.filter(i => i.done).length;
-  const P = state.settings.promoteAfter;
+  const n = confGaps().length;
   const rows = items.map(it => {
     const s = state.sections[it.sid];
     const sid = `data-sid="${s.id}"`;
     let right;
-    if (c === 'conf' && s.confRevs >= P) right = `<button class="tag" data-action="promote" ${sid}>Ready?</button>`;
-    else if (c === 'conf') right = `<span class="meta">${Math.min(s.confRevs + (it.done ? 0 : 1), P)} of ${P}</span>`;
+    if (c === 'conf' && s.confReady) right = `<button class="tag" data-action="promote" ${sid}>Ready?</button>`;
+    else if (c === 'conf') right = `<span class="meta">${Math.min(confStepOf(s) + (it.done ? 0 : 1), n)} of ${n}</span>`;
     else right = `<span class="meta">${it.done ? 'today' : shortAgo(s.lastRevised)}</span>`;
-    return `
+    return planRow(it, c, right);
+  }).join('');
+  return `<section class="block" data-flip="b-${c}">${label(c, name, `${fmtJuz(items.length)} juz`, `${done}/${items.length}`, `lbl-${c}`)}
+    <div class="card list">${rows}</div></section>`;
+}
+
+function planRow(it, c, right) {
+  const s = state.sections[it.sid];
+  const sid = `data-sid="${s.id}"`;
+  return `
       <div class="item ${it.done ? 'done' : ''}">
         <button class="check ${c} ${it.done ? 'on' : ''}" ${anim(`chk-${s.id}`, 'pop', it.done ? 1 : 0)} data-action="${it.done ? 'undo' : 'complete'}" ${sid} aria-label="Toggle done">${I.check}</button>
         <button class="item-main" data-action="open" ${sid}><div class="t">${title(s.id)}</div><div class="s">${juzName(s.id)}</div></button>
         ${right}
       </div>`;
-  }).join('');
-  return `<section class="block" data-flip="b-${c}">${label(c, name, `${fmtJuz(items.length)} juz`, `${done}/${items.length}`, `lbl-${c}`)}
-    <div class="card list">${rows}</div></section>`;
 }
 
 /* ---------- Queues ---------- */
@@ -838,11 +1020,12 @@ function renderQueues() {
     return html + `<div class="card list qa">${rows}</div>`;
   }
 
-  const list = rotation(q);
-  const P = state.settings.promoteAfter;
+  const list = queueList(q);
+  const gaps = confGaps();
+  const cap = state.settings.maintPerDay ? Math.round(avgMaintGap() * state.settings.maxGapPct / 100) : 0;
   html += q === 'conf'
-    ? `<p class="desc qa">About ${fmtJuz(state.settings.confPerDay)} juz a day, longest-unrevised first. After ${P} revisions you'll be asked if it feels confident.</p>`
-    : `<p class="desc qa">About ${fmtJuz(state.settings.maintPerDay)} juz a day. Whatever has gone longest without revision comes first.</p>`;
+    ? `<p class="desc qa">About ${fmtJuz(state.settings.confPerDay)} juz a day. Each section comes back after growing gaps of ${gaps.join(', ')} days, most overdue first. Once it holds up over the ${gaps[gaps.length - 1]}-day gap you'll be asked if it feels confident.</p>`
+    : `<p class="desc qa">About ${fmtJuz(state.settings.maintPerDay)} juz a day. Newly confident sections come round sooner, long-established ones a little later${cap ? `, and none goes longer than ${cap} days` : ''}.</p>`;
   if (!list.length) {
     return html + (q === 'conf'
       ? emptyQueue('Nothing here yet', 'Sections arrive once a strengthening cycle finishes.')
@@ -851,8 +1034,8 @@ function renderQueues() {
   const rows = list.map((s, i) => {
     const next = nextScheduled(s);
     const sub = q === 'conf'
-      ? `${s.confRevs} of ${P} revisions · ${shortAgo(s.lastRevised)}`
-      : `Last revised ${agoDay(s.lastRevised).toLowerCase()}`;
+      ? (s.confReady ? `Ready to confirm · ${shortAgo(s.lastRevised)}` : `${confGap(s)}-day gap · ${shortAgo(s.lastRevised)}`)
+      : `Last revised ${agoDay(s.lastRevised).toLowerCase()}${confidentDays(s) != null && confidentDays(s) < SETTLED_CONFIDENT_DAYS ? ' · newly confident' : ''}`;
     return `
       <div class="item" data-flip="q-${s.id}" style="--k:${Math.min(i, 12)}">
         <span class="pos">${i + 1}</span>
@@ -1192,7 +1375,7 @@ function openEtaInfo() {
   const f = greenForecast();
   const st = state.settings;
   const weakDays = state.weakQueue.reduce((n, id) => n + Math.max(0, cycleTarget(state.sections[id]) - state.sections[id].cycleDone), 0);
-  const confNeed = inCat('conf').reduce((n, s) => n + Math.max(0, st.promoteAfter - s.confRevs), 0);
+  const building = inCat('conf').filter(s => !s.confReady).length;
   openSheet(`
     <div class="sh-head"><h2>Path to green</h2>
       <p>${f.never ? 'Confidence building is set to 0 in Settings, so sections never become confident.'
@@ -1200,10 +1383,10 @@ function openEtaInfo() {
         : 'Every memorised section is strong and confident.'}</p></div>
     <div class="card list kv">
       <div class="item"><span class="k">${dot('weak')} Strengthening left</span><span class="v">${weakDays} day${weakDays === 1 ? '' : 's'} · ${state.weakQueue.length} section${state.weakQueue.length === 1 ? '' : 's'}</span></div>
-      <div class="item"><span class="k">${dot('conf')} Confidence revisions left</span><span class="v">${confNeed}</span></div>
+      <div class="item"><span class="k">${dot('conf')} Building confidence</span><span class="v">${building} section${building === 1 ? '' : 's'}</span></div>
       <div class="item"><span class="k">${dot('maint')} Ready to confirm</span><span class="v">${f.ready}</span></div>
     </div>
-    <p class="fine">Assumes one strengthening cycle at a time finishing on schedule, ${fmtJuz(st.confPerDay)} juz of confidence building a day, and each section confirmed confident after ${st.promoteAfter} revisions. Sections that finish strengthening join the confidence rotation. Extra recitations make it sooner.</p>`);
+    <p class="fine">Assumes strengthening cycles finish on schedule, ${fmtJuz(st.confPerDay)} juz of confidence building a day following the growing gaps, and each section confirmed confident at its ${st.checkinGap}-day check-in. Extra recitations can make it sooner.</p>`);
 }
 
 /**
@@ -1234,11 +1417,11 @@ function syncSelBar() {
 function renderSettings() {
   const st = state.settings;
   const total = (inCat('weak').length ? st.weakPerDay : 0) + st.confPerDay + st.maintPerDay;
-  const stepper = (key, min, max, fmt) => `
+  const stepper = (key, min, max, fmt, inc = 1) => `
     <div class="stepper">
-      <button data-action="step" data-key="${key}" data-d="-1" ${st[key] <= min ? 'disabled' : ''} aria-label="Decrease">−</button>
+      <button data-action="step" data-key="${key}" data-d="${-inc}" ${st[key] <= min ? 'disabled' : ''} aria-label="Decrease">−</button>
       <span ${anim(`st-${key}`, 'bump', st[key])}>${fmt(st[key])}</span>
-      <button data-action="step" data-key="${key}" data-d="1" ${st[key] >= max ? 'disabled' : ''} aria-label="Increase">+</button>
+      <button data-action="step" data-key="${key}" data-d="${inc}" ${st[key] >= max ? 'disabled' : ''} aria-label="Increase">+</button>
     </div>`;
   const row = (t, s, ctrl) => `<div class="item"><div class="item-main"><div class="t">${t}</div><div class="s">${s}</div></div>${ctrl}</div>`;
   const link = (action, t, cls = '') => `<button class="item link-row ${cls}" data-action="${action}"><span class="item-main t">${t}</span>${I.chev}</button>`;
@@ -1273,7 +1456,9 @@ function renderSettings() {
     <section class="block"><div class="group-title">Cycles</div>
       <div class="card list">
         ${row('Strengthening cycle', 'Days on each weak section', stepper('cycleLength', 1, 10, v => `${v} d`))}
-        ${row('Confidence check-in', 'Revisions before asking', stepper('promoteAfter', 1, 30, v => `${v}×`))}
+        ${row('Confidence check-in', 'Longest gap before asking', stepper('checkinGap', 5, 30, v => `${v} d`))}
+        ${row('Keep warm', 'Light read of a waiting weak section', stepper('touchEvery', 0, 14, v => v ? `every ${v} d` : 'Off'))}
+        ${row('Longest confident gap', 'Compared with the average', stepper('maxGapPct', 110, 300, v => `${(v / 100).toFixed(1)}×`, 10))}
       </div></section>
 
     <section class="block"><div class="group-title">Preview</div>
@@ -1331,12 +1516,13 @@ function openSection(sid) {
   const idx = state.weakQueue.indexOf(sid);
   const isCur = c === 'weak' && idx === 0;
   const qName = { weak: 'Weak', conf: 'Confidence', maint: 'Maintenance' }[c];
-  const P = state.settings.promoteAfter;
+  const gaps = confGaps();
 
   const status = {
     weak: isCur ? `Strengthening now — day ${Math.min(s.cycleDone + 1, cycleTarget(s))} of ${cycleTarget(s)}` : `Waiting in the weak queue`,
-    conf: `Building confidence — ${s.confRevs} of ${P} revisions`,
-    maint: 'In long-term maintenance',
+    conf: s.confReady ? 'Held up over the check-in gap — ready to confirm'
+      : `Building confidence — gap ${confStepOf(s) + 1} of ${gaps.length} (${confGap(s)} days)`,
+    maint: confidentDays(s) != null && confidentDays(s) < SETTLED_CONFIDENT_DAYS ? 'In maintenance · newly confident, comes round sooner' : 'In long-term maintenance',
     none: 'Not part of your revision plan',
   }[c];
 
@@ -1386,11 +1572,12 @@ function openPromote(sid) {
   sheetSid = null;
   const s = state.sections[sid];
   openSheet(`
-    <div class="sh-head"><h2>Feeling confident?</h2><p>You've revised ${title(sid)} ${s.confRevs} times.</p></div>
+    <div class="sh-head"><h2>Feeling confident?</h2><p>${title(sid)} has held up over a ${state.settings.checkinGap}-day gap.</p></div>
     <div class="card list opts">
       <button class="item opt" data-action="set-conf" data-sid="${sid}" data-v="confident"><div class="item-main"><div class="t">Yes, it's confident</div><div class="s">Move to maintenance</div></div>${I.chev}</button>
-      ${opt('close-sheet', null, 'Keep practising', 'Stays in the confidence rotation')}
-    </div>`);
+      ${opt('keep-practising', sid, 'Keep practising', `Ask again after another ${state.settings.checkinGap}-day gap`)}
+    </div>
+    <div class="links"><button class="link" data-action="close-sheet">Decide later</button></div>`);
 }
 
 function openReset() {
@@ -1700,6 +1887,7 @@ const actions = {
   'cycle-opts': d => openCycleOpts(+d.sid),
   'switch-weak': () => { closeSheet(); ui.tab = 'queues'; ui.queueTab = 'weak'; render(); toast('Use ↑ or tap a section to choose what’s next'); },
   promote: d => openPromote(+d.sid),
+  'keep-practising': d => { closeSheet(); keepPractising(+d.sid); },
   wmove: d => moveWeak(+d.sid, +d.to),
   'work-now': d => { moveWeak(+d.sid, 0); closeSheet(); toast(`Now strengthening ${title(+d.sid)}`); },
   'make-next': d => { moveWeak(+d.sid, 1); closeSheet(); toast(`${title(+d.sid)} is up next`); },
@@ -1735,7 +1923,7 @@ const actions = {
     toast(`${n} section${n > 1 ? 's' : ''} → ${CAT_NAME[d.kind]}`);
   },
   step: d => {
-    const lim = { confPerDay: [0, 8], maintPerDay: [0, 20], cycleLength: [1, 10], promoteAfter: [1, 30], dayOffset: [0, 365] }[d.key];
+    const lim = { confPerDay: [0, 8], maintPerDay: [0, 20], cycleLength: [1, 10], checkinGap: [5, 30], touchEvery: [0, 14], maxGapPct: [110, 300], dayOffset: [0, 365] }[d.key];
     const v = state.settings[d.key] + +d.d;
     if (v < lim[0] || v > lim[1]) return;
     state.settings[d.key] = v;
